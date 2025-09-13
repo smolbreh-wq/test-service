@@ -466,17 +466,30 @@ def create_bot(prefix: str, bot_name: str):
             user_id = message.author.id
             spam_key = f"{target_prefix}_{user_id}"
             
-            if spam_key in spam_states:
-                spam_states[spam_key]['message'] = new_message
+            # Allow editing even when spam is stopped - create/update spam state
+            if spam_key not in spam_states:
+                # Create new spam state if none exists
+                spam_states[spam_key] = {'message': new_message, 'delay': 1.0, 'active': False}
                 try:
-                    await message.author.send(f"✅ Updated {target_prefix} bot spam message")
+                    await message.author.send(f"✅ Set {target_prefix} bot spam message: '{new_message}' (use {target_prefix}start to begin)")
                 except:
                     pass
             else:
-                try:
-                    await message.author.send(f"❌ No active spam on {target_prefix} bot")
-                except:
-                    pass
+                # Update existing spam state
+                old_message = spam_states[spam_key]['message']
+                spam_states[spam_key]['message'] = new_message
+                if spam_key in spam_tasks:
+                    # Active spam - will update automatically
+                    try:
+                        await message.author.send(f"✅ Updated {target_prefix} bot active spam message")
+                    except:
+                        pass
+                else:
+                    # Stopped spam - ready for restart
+                    try:
+                        await message.author.send(f"✅ Updated {target_prefix} bot spam message: '{new_message}' (use {target_prefix}start to begin)")
+                    except:
+                        pass
             return
 
         # User management
