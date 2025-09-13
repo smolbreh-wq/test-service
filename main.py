@@ -30,6 +30,7 @@ emergency_stop = False
 last_commands = {}
 spam_states = {}  # Store current spam message for editing
 bot_tokens = {}   # Store bot tokens for management
+bot_prefixes = {} # Store bot prefixes for dynamic changing
 
 MAX_RESTART_ATTEMPTS = 3
 RESTART_DELAY = 5
@@ -75,6 +76,7 @@ def store_last_command(prefix: str, user_id: int, command_type: str, **kwargs):
         'prefix': prefix,
         **kwargs
     }
+    print(f"✅ Stored command: {command_type} for {prefix}_{user_id}")
 
 async def restart_last_command(ctx, prefix: str, error_msg: str = None):
     """Restart the last command after an error"""
@@ -82,6 +84,7 @@ async def restart_last_command(ctx, prefix: str, error_msg: str = None):
     key = f"{prefix}_{user_id}"
 
     if key not in last_commands:
+        print(f"❌ No command to restart for {key}")
         return False
 
     command_data = last_commands[key]
@@ -112,7 +115,7 @@ async def restart_last_command(ctx, prefix: str, error_msg: str = None):
             await execute_send_command(ctx, command_data['message'], 
                                      command_data['delay'], command_data['amount'], 
                                      store_command=False)
-        elif command_data['command_type'] == 'spm':
+        elif command_data['command_type'] in ['spm', 'start']:
             await execute_spm_command(ctx, prefix, command_data['message'], 
                                     command_data['delay'], store_command=False)
         return True
@@ -167,9 +170,6 @@ async def execute_send_command(ctx, message: str, delay: float, amount: int, sto
             break
 
     stop_flags.pop(user_id, None)
-    key = f"{prefix}_{user_id}"
-    if key in last_commands and last_commands[key]['command_type'] == 'send':
-        last_commands.pop(key, None)
 
 async def spam_loop_with_restart(ctx, message: str, delay: float, prefix: str):
     """Continuous spam loop with restart capability"""
@@ -221,9 +221,6 @@ async def spam_loop_with_restart(ctx, message: str, delay: float, prefix: str):
     finally:
         # Clean up
         spam_states.pop(spam_key, None)
-        key = f"{prefix}_{user_id}"
-        if key in last_commands and last_commands[key]['command_type'] == 'spm':
-            last_commands.pop(key, None)
 
 async def execute_spm_command(ctx, prefix: str, message: str, delay: float, store_command: bool = True):
     """Execute spam command with state management"""
@@ -231,7 +228,7 @@ async def execute_spm_command(ctx, prefix: str, message: str, delay: float, stor
     spam_key = f"{prefix}_{user_id}"
 
     if store_command:
-        store_last_command(prefix, user_id, 'spm', message=message, delay=delay)
+        store_last_command(prefix, user_id, 'start', message=message, delay=delay)
 
     # Stop existing spam
     if spam_key in spam_tasks:
@@ -259,8 +256,9 @@ async def execute_spm_command(ctx, prefix: str, message: str, delay: float, stor
         spam_states.pop(spam_key, None)
 
 def create_bot(prefix: str, bot_name: str):
-    """Create optimized bot instance"""
-    bot = commands.Bot(command_prefix=prefix)
+    """Create optimized self-bot instance"""
+    bot = commands.Bot(command_prefix=prefix, self_bot=True)
+    bot_prefixes[prefix] = bot  # Store reference for prefix changes
 
     @bot.event
     async def on_ready():
@@ -288,6 +286,30 @@ def create_bot(prefix: str, bot_name: str):
         await execute_send_command(ctx, message, delay, amount)
 
     @bot.command()
+    async def start(ctx, message: str = None, delay: float = 1.0):
+        """Start spam: {prefix}start "message" delay OR {prefix}start (uses stored message)"""
+        user_id = ctx.author.id
+        spam_key = f"{prefix}_{user_id}"
+        
+        # If no message provided, try to use stored message
+        if not message:
+            if spam_key in spam_states:
+                message = spam_states[spam_key]['message']
+                delay = spam_states[spam_key].get('delay', delay)
+            else:
+                return await ctx.author.send("⚠️ No message provided and no stored message found. Use: start \"message\" delay")
+        
+        if delay < MIN_DELAY:
+            return await ctx.author.send(f"⚠️ Min delay: {MIN_DELAY}s")
+        
+        try:
+            await ctx.message.delete()
+        except:
+            pass
+        
+        await execute_spm_command(ctx, prefix, message, delay)
+
+    @bot.command()
     async def spm(ctx, action: str, message: str = None, delay: float = 1.0):
         """Spam control: {prefix}spm start/stop "message" delay"""
         user_id = ctx.author.id
@@ -295,7 +317,13 @@ def create_bot(prefix: str, bot_name: str):
 
         if action.lower() == "start":
             if not message:
-                return await ctx.author.send("⚠️ Need message to spam")
+                # Try to use stored message
+                if spam_key in spam_states:
+                    message = spam_states[spam_key]['message']
+                    delay = spam_states[spam_key].get('delay', delay)
+                else:
+                    return await ctx.author.send("⚠️ Need message to spam")
+            
             if delay < MIN_DELAY:
                 return await ctx.author.send(f"⚠️ Min delay: {MIN_DELAY}s")
             
@@ -361,18 +389,43 @@ def create_bot(prefix: str, bot_name: str):
         await restart_last_command(ctx, prefix)
 
     @bot.command()
+    async def change(ctx, old_prefix: str, new_prefix: str):
+        """Change bot prefix: {prefix}change old_prefix new_prefix"""
+        if old_prefix == prefix and old_prefix in bot_prefixes:
+            if new_prefix in bot_prefixes:
+                return await ctx.author.send(f"❌ Prefix '{new_prefix}' already exists")
+            
+            # Update the bot's prefix
+            bot.command_prefix = new_prefix
+            
+            # Update global references
+            bot_prefixes[new_prefix] = bot_prefixes.pop(old_prefix)
+            bots[new_prefix] = bots.pop(old_prefix, bot)
+            
+            if old_prefix in bot_tokens:
+                bot_tokens[new_prefix] = bot_tokens.pop(old_prefix)
+            
+            try:
+                await ctx.author.send(f"✅ Changed prefix from '{old_prefix}' to '{new_prefix}'")
+            except:
+                pass
+        else:
+            await ctx.author.send(f"❌ Cannot change prefix for {old_prefix} from {prefix} bot")
+
+    @bot.command(name='help')
     async def help_bot(ctx):
         """Show help for this bot"""
-        help_text = f"""🤖 **Bot Help** (Prefix: {prefix})
+        help_text = f"""🤖 **Self-Bot Help** (Prefix: {prefix})
 
 **Basic Commands:**
 • `{prefix}send "message" delay amount` - Send message multiple times
-• `{prefix}start "message" delay` - Start spam (or just `{prefix}start` for last/edited)
-• `{prefix}spm start "message" delay` - Start spam (same as start)
+• `{prefix}start "message" delay` - Start spam
+• `{prefix}start` - Start spam with last/edited message
+• `{prefix}spm start "message" delay` - Start spam (alternative)
 • `{prefix}spm stop` - Stop spam
 • `{prefix}stop` - Stop all activities
 • `{prefix}restart` - Restart last command
-• `{prefix}change old_prefix new_prefix` - Change bot prefix
+• `{prefix}change {prefix} new_prefix` - Change this bot's prefix
 
 **Management Commands:**
 • `>addbot token prefix` - Add new bot
@@ -381,9 +434,14 @@ def create_bot(prefix: str, bot_name: str):
 • `>revoke userid` - Remove authorized user
 • `>stopall` - Emergency stop all bots
 
-**Limits:** Min delay {MIN_DELAY}s, Max amount {MAX_AMOUNT}"""
+**Limits:** Min delay {MIN_DELAY}s, Max amount {MAX_AMOUNT}
+
+**Note:** This is a self-bot system. Commands work across all configured bots."""
         
-        await ctx.send(help_text)
+        try:
+            await ctx.send(help_text)
+        except:
+            await ctx.author.send(help_text)
 
     @bot.event
     async def on_message(message):
@@ -476,7 +534,6 @@ def create_bot(prefix: str, bot_name: str):
                     pass
             else:
                 # Update existing spam state
-                old_message = spam_states[spam_key]['message']
                 spam_states[spam_key]['message'] = new_message
                 if spam_key in spam_tasks:
                     # Active spam - will update automatically
@@ -528,19 +585,22 @@ def create_bot(prefix: str, bot_name: str):
             return
         
         if is_authorized(ctx.author.id):
-            error_msg = "Unknown command" if isinstance(error, commands.CommandNotFound) else str(error)
+            if isinstance(error, commands.CommandNotFound):
+                return  # Ignore command not found for self-bots
+            
+            error_msg = str(error)
             try:
                 await ctx.author.send(f"⚠️ {error_msg}")
             except:
-                pass
+                print(f"Command error: {error_msg}")
 
     return bot
 
 async def run_multiple_bots():
-    """Run all configured bots"""
+    """Run all configured self-bots"""
     await load_user_data()
     
-    # Hardcoded tokens
+    # Hardcoded tokens (replace with your actual tokens)
     HARDCODED_TOKENS = {
         "TOKEN": "",
         "TOKEN2": "",
@@ -552,15 +612,15 @@ async def run_multiple_bots():
     for token_name, prefix in BOT_CONFIGS.items():
         token = HARDCODED_TOKENS.get(token_name) or os.getenv(token_name)
         if token:
-            bot = create_bot(prefix, f"Bot-{prefix}")
+            bot = create_bot(prefix, f"Self-Bot-{prefix}")
             bots[prefix] = bot
             bot_tokens[prefix] = token
             
             task = asyncio.create_task(bot.start(token))
             bot_tasks.append(task)
-            print(f"🚀 Starting {prefix} bot")
+            print(f"🚀 Starting {prefix} self-bot")
         else:
-            print(f"⚠️ No token for {prefix} bot")
+            print(f"⚠️ No token for {prefix} self-bot")
 
     if not bot_tasks:
         print("❌ No valid tokens found")
@@ -574,13 +634,16 @@ async def run_multiple_bots():
 if __name__ == "__main__":
     keep_alive()
     
-    print("🤖 Optimized Discord Multi-Bot System")
+    print("🤖 Optimized Discord Self-Bot Multi-System")
     print("=" * 50)
-    print("New Features:")
+    print("Features:")
+    print("• prefix + start - Start spam with message/delay or use stored")
+    print("• prefix + restart - Restart last command (now remembers properly)")
+    print("• prefix + change old new - Change bot prefix")
     print("• >addbot token prefix - Add bots dynamically")
     print("• >edit prefix \"message\" - Edit spam messages")
     print("• >allow/revoke userid - Manage users")
-    print("• Improved auto-restart system")
+    print("• Auto-restart system with memory")
     print("• Cross-bot command execution")
     print("=" * 50)
 
