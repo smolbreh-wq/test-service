@@ -257,7 +257,7 @@ async def execute_spm_command(ctx, prefix: str, message: str, delay: float, stor
 
 def create_bot(prefix: str, bot_name: str):
     """Create optimized self-bot instance"""
-    bot = commands.Bot(command_prefix=prefix, self_bot=True)
+    bot = commands.Bot(command_prefix=prefix, self_bot=True, help_command=None)
     bot_prefixes[prefix] = bot  # Store reference for prefix changes
 
     @bot.event
