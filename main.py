@@ -3,59 +3,80 @@ import discord
 from discord.ext import commands
 import asyncio
 from keep_alive import keep_alive
-
 import json
 import aiofiles
 
 # ---------- CONFIG ----------
-# Bot configurations: {token_env_name: prefix}
 BOT_CONFIGS = {
-    "TOKEN": "$",  # Main bot with $ prefix
-    "TOKEN2": "!",  # Second bot with ! prefix  
-    "TOKEN3": "?",  # Third bot with ? prefix
-    # Add more bots as needed: "TOKEN4": "&", etc.
+    "TOKEN": "$",
+    "TOKEN2": "!",
+    "TOKEN3": "?",
 }
 
 ALLOWED_USERS = [
     1096838620712804405,
     1348330851263315968,
-    1414215242388344994  # replace with your Discord user ID (int)
-    # Add more user IDs here as needed
+    1414215242388344994
 ]
-MIN_DELAY = 0.5  # seconds
+
+MIN_DELAY = 0.5
 MAX_AMOUNT = 20
 
-# Global variables to track spam tasks and stop flags for all bots
+# Global state management
 spam_tasks = {}
 stop_flags = {}
 bots = {}
 emergency_stop = False
+last_commands = {}
+spam_states = {}  # Store current spam message for editing
+bot_tokens = {}   # Store bot tokens for management
+bot_prefixes = {} # Store bot prefixes for dynamic changing
 
-# Auto-restart functionality
-last_commands = {
-}  # Track last command per user per bot: {f"{prefix}_{user_id}": command_data}
-restart_tasks = {}  # Track restart attempts
 MAX_RESTART_ATTEMPTS = 3
-RESTART_DELAY = 5  # seconds to wait before restart
+RESTART_DELAY = 5
 
-# New global variables for enhanced features
-bot_prefixes = {}  # Track prefix for each bot: {bot_user_id: prefix}
-paused_spam = {}   # Track paused spam commands: {spam_key: (message, delay)}
-current_spam_messages = {}  # Track current spam messages: {spam_key: message}
 # ---------------------------
 
+async def save_user_data():
+    """Save allowed users to file"""
+    try:
+        async with aiofiles.open('user_data.json', 'w') as f:
+            await f.write(json.dumps({'allowed_users': ALLOWED_USERS}, indent=2))
+    except Exception as e:
+        print(f"Failed to save user data: {e}")
 
-def store_last_command(prefix: str, user_id: int, command_type: str, channel_id: int = None, **kwargs):
+async def load_user_data():
+    """Load allowed users from file"""
+    global ALLOWED_USERS
+    try:
+        async with aiofiles.open('user_data.json', 'r') as f:
+            content = await f.read()
+            data = json.loads(content)
+            ALLOWED_USERS.extend([uid for uid in data.get('allowed_users', []) if uid not in ALLOWED_USERS])
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"Failed to load user data: {e}")
+
+def is_authorized(user_id: int) -> bool:
+    """Check if user is authorized"""
+    return user_id in ALLOWED_USERS
+
+def get_bot_by_prefix(prefix: str):
+    """Get bot instance by prefix"""
+    return bots.get(prefix)
+
+def store_last_command(prefix: str, user_id: int, command_type: str, **kwargs):
     """Store the last executed command for auto-restart"""
     key = f"{prefix}_{user_id}"
     last_commands[key] = {
         'command_type': command_type,
         'timestamp': asyncio.get_event_loop().time(),
         'attempts': 0,
-        'channel_id': channel_id,
+        'prefix': prefix,
         **kwargs
     }
-
+    print(f"✅ Stored command: {command_type} for {prefix}_{user_id}")
 
 async def restart_last_command(ctx, prefix: str, error_msg: str = None):
     """Restart the last command after an error"""
@@ -63,17 +84,17 @@ async def restart_last_command(ctx, prefix: str, error_msg: str = None):
     key = f"{prefix}_{user_id}"
 
     if key not in last_commands:
+        print(f"❌ No command to restart for {key}")
         return False
 
     command_data = last_commands[key]
     command_data['attempts'] += 1
 
-    # Don't restart if too many attempts
     if command_data['attempts'] > MAX_RESTART_ATTEMPTS:
         try:
             await ctx.author.send(
-                f"❌ Max restart attempts ({MAX_RESTART_ATTEMPTS}) reached for {prefix} bot. "
-                f"Please manually restart the command if needed.")
+                f"❌ Max restart attempts ({MAX_RESTART_ATTEMPTS}) reached for {prefix} bot."
+            )
         except:
             pass
         last_commands.pop(key, None)
@@ -81,173 +102,74 @@ async def restart_last_command(ctx, prefix: str, error_msg: str = None):
 
     try:
         await ctx.author.send(
-            f"🔄 Restarting command on {prefix} bot (attempt {command_data['attempts']}/{MAX_RESTART_ATTEMPTS})"
-            f"{f' after error: {error_msg}' if error_msg else ''}...")
+            f"🔄 Auto-restarting {prefix} bot (attempt {command_data['attempts']}/{MAX_RESTART_ATTEMPTS})"
+            f"{f' - Error: {error_msg}' if error_msg else ''}"
+        )
     except:
         pass
 
-    # Wait before restart
     await asyncio.sleep(RESTART_DELAY)
 
-    # Get the original channel for restart
-    channel = None
-    if command_data.get('channel_id'):
-        try:
-            channel = ctx.bot.get_channel(command_data['channel_id'])
-            if not channel:
-                channel = await ctx.bot.fetch_channel(command_data['channel_id'])
-        except:
-            channel = ctx.channel
-
-    if not channel:
-        channel = ctx.channel
-
-    # Create a new context for the restart
-    restart_ctx = type('RestartContext', (), {
-        'send': channel.send,
-        'channel': channel,
-        'author': ctx.author,
-        'bot': ctx.bot
-    })()
-
-    # Restart based on command type
     try:
         if command_data['command_type'] == 'send':
-            # Recreate send command
-            message = command_data['message']
-            delay = command_data['delay']
-            amount = command_data['amount']
-
-            # Don't store again to avoid infinite loop
-            await execute_send_command(restart_ctx,
-                                       message,
-                                       delay,
-                                       amount,
-                                       store_command=False)
-
-        elif command_data['command_type'] == 'spm':
-            # Recreate spm command
-            message = command_data['message']
-            delay = command_data['delay']
-
-            # Don't store again to avoid infinite loop
-            await execute_spm_command(restart_ctx,
-                                      prefix,
-                                      message,
-                                      delay,
-                                      store_command=False)
-
+            await execute_send_command(ctx, command_data['message'], 
+                                     command_data['delay'], command_data['amount'], 
+                                     store_command=False)
+        elif command_data['command_type'] in ['spm', 'start']:
+            await execute_spm_command(ctx, prefix, command_data['message'], 
+                                    command_data['delay'], store_command=False)
         return True
-
     except Exception as e:
         try:
-            await ctx.author.send(
-                f"❌ Failed to restart command on {prefix} bot: {e}")
+            await ctx.author.send(f"❌ Failed to restart {prefix} bot: {e}")
         except:
             pass
         return False
 
-
-async def execute_send_command(ctx,
-                               message: str,
-                               delay: float,
-                               amount: int,
-                               store_command: bool = True):
-    """Execute the send command with optional command storage"""
+async def execute_send_command(ctx, message: str, delay: float, amount: int, store_command: bool = True):
+    """Execute send command with error handling and restart"""
     prefix = ctx.bot.command_prefix
     user_id = ctx.author.id
 
-    # Store command for auto-restart
     if store_command:
-        store_last_command(prefix,
-                           user_id,
-                           'send',
-                           channel_id=ctx.channel.id,
-                           message=message,
-                           delay=delay,
-                           amount=amount)
+        store_last_command(prefix, user_id, 'send', message=message, delay=delay, amount=amount)
 
-    # Create a stop flag for this user
     stop_flags[user_id] = False
 
-    # Send the repeated messages
     for i in range(amount):
-        # Check if user requested to stop or emergency stop activated
         if stop_flags.get(user_id, False) or emergency_stop:
-            # Send stop notification to user's DM
             try:
-                if emergency_stop:
-                    await ctx.author.send(
-                        f"🚨 Emergency stop activated. Message sending stopped after {i} messages."
-                    )
-                else:
-                    await ctx.author.send(
-                        f"🛑 Message sending stopped after {i} messages.")
+                status = "Emergency stop" if emergency_stop else "Manual stop"
+                await ctx.author.send(f"🛑 {status} - Sent {i} messages")
             except:
                 pass
             break
 
         try:
             await ctx.send(message)
-            # Don't sleep after the last message
             if i < amount - 1:
                 await asyncio.sleep(delay)
-
-        # ---- 503 resilience (do not die; wait + continue) ----
-        except discord.errors.DiscordServerError as e:
+        except (discord.errors.DiscordServerError, discord.HTTPException) as e:
             if getattr(e, "status", None) == 503:
-                try:
-                    await ctx.author.send(
-                        f"⚠️ Discord server error (503). Retrying…")
-                except:
-                    pass
                 await asyncio.sleep(3)
                 continue
-            else:
-                try:
-                    await ctx.author.send(
-                        f"⚠️ Discord server error occurred: {e}")
-                except:
-                    pass
-                # Try to restart on non-503 server errors
-                if await restart_last_command(ctx, prefix, str(e)):
-                    return
-                break
-
-        except discord.HTTPException as e:
-            # Keep original DM, but if it's specifically 503, don't stop
             try:
-                await ctx.author.send(f"⚠️ Discord API error occurred: {e}")
+                await ctx.author.send(f"⚠️ Error: {e}")
             except:
                 pass
-            if getattr(e, "status", None) == 503:
-                await asyncio.sleep(3)
-                continue
-            # Try to restart on non-503 HTTP errors
             if await restart_last_command(ctx, prefix, str(e)):
                 return
             break
-        # ------------------------------------------------------
-
         except Exception as e:
-            # Send error to user's DM
             try:
-                await ctx.author.send(f"⚠️ Unexpected error occurred: {e}")
+                await ctx.author.send(f"⚠️ Unexpected error: {e}")
             except:
                 pass
-            # Try to restart on unexpected errors
             if await restart_last_command(ctx, prefix, str(e)):
                 return
             break
 
-    # Clean up the stop flag
     stop_flags.pop(user_id, None)
-
-    # Clear last command on successful completion
-    key = f"{prefix}_{user_id}"
-    if key in last_commands and last_commands[key]['command_type'] == 'send':
-        last_commands.pop(key, None)
-
 
 async def spam_loop_with_restart(ctx, message: str, delay: float, prefix: str):
     """Continuous spam loop with restart capability"""
@@ -256,134 +178,73 @@ async def spam_loop_with_restart(ctx, message: str, delay: float, prefix: str):
     user_id = ctx.author.id
     spam_key = f"{prefix}_{user_id}"
 
-    # Store current message for editing
-    current_spam_messages[spam_key] = message
-
     try:
-        while True:
-            if emergency_stop:
-                try:
-                    await ctx.author.send(
-                        f"🚨 Emergency stop activated. Spam stopped after {count} messages."
-                    )
-                except:
-                    pass
-                break
+        while spam_key in spam_tasks and not emergency_stop:
+            # Check for message updates
+            if spam_key in spam_states:
+                current_message = spam_states[spam_key].get('message', message)
+                if current_message != message:
+                    message = current_message
+                    try:
+                        await ctx.author.send(f"📝 Updated spam message to: '{message}'")
+                    except:
+                        pass
 
-            # Check if spam is paused
-            if spam_key in paused_spam:
-                try:
-                    await ctx.author.send(f"⏸️ Spam paused on {prefix} bot after {count} messages.")
-                except:
-                    pass
-                
-                # Wait for resume
-                while spam_key in paused_spam and not emergency_stop:
-                    await asyncio.sleep(1)
-                
-                if emergency_stop:
-                    break
-                    
-                # Resume notification
-                try:
-                    await ctx.author.send(f"▶️ Spam resumed on {prefix} bot.")
-                except:
-                    pass
-
-            # Get current message (might have been edited)
-            current_message = current_spam_messages.get(spam_key, message)
-
-            # ---- 503 resilience inside spam loop ----
             try:
-                await ctx.send(current_message)
+                await ctx.send(message)
                 count += 1
-            except discord.errors.DiscordServerError as e:
+            except (discord.errors.DiscordServerError, discord.HTTPException) as e:
                 if getattr(e, "status", None) == 503:
                     await asyncio.sleep(3)
                     continue
-                else:
-                    # Try to restart on non-503 server errors
-                    if await restart_last_command(ctx, prefix, str(e)):
-                        return
-                    raise
-            except discord.HTTPException as e:
-                if getattr(e, "status", None) == 503:
-                    await asyncio.sleep(3)
-                    continue
-                else:
-                    # Try to restart on non-503 HTTP errors
-                    if await restart_last_command(ctx, prefix, str(e)):
-                        return
-                    raise
-            except Exception as e:
-                # Try to restart on unexpected errors
                 if await restart_last_command(ctx, prefix, str(e)):
                     return
                 raise
-            # -----------------------------------------
+            except Exception as e:
+                if await restart_last_command(ctx, prefix, str(e)):
+                    return
+                raise
 
             await asyncio.sleep(delay)
     except asyncio.CancelledError:
         try:
-            await ctx.author.send(f"🛑 Spam stopped after {count} messages.")
+            await ctx.author.send(f"🛑 Spam stopped after {count} messages")
         except:
             pass
-        # Clear last command on cancellation
-        key = f"{prefix}_{user_id}"
-        if key in last_commands and last_commands[key]['command_type'] == 'spm':
-            last_commands.pop(key, None)
-        # Clean up current message tracking
-        current_spam_messages.pop(spam_key, None)
         raise
     except Exception as e:
         try:
             await ctx.author.send(f"⚠️ Spam error after {count} messages: {e}")
         except:
             pass
-        # Clean up current message tracking
-        current_spam_messages.pop(spam_key, None)
         raise
     finally:
-        # Clean up current message tracking
-        current_spam_messages.pop(spam_key, None)
+        # Clean up
+        spam_states.pop(spam_key, None)
 
-
-async def execute_spm_command(ctx,
-                              prefix: str,
-                              message: str,
-                              delay: float,
-                              store_command: bool = True):
-    """Execute the spm start command with optional command storage"""
+async def execute_spm_command(ctx, prefix: str, message: str, delay: float, store_command: bool = True):
+    """Execute spam command with state management"""
     user_id = ctx.author.id
-
-    # Store command for auto-restart
-    if store_command:
-        store_last_command(prefix,
-                           user_id,
-                           'spm',
-                           channel_id=ctx.channel.id,
-                           message=message,
-                           delay=delay)
-
-    # Create unique key for this bot and user combination
     spam_key = f"{prefix}_{user_id}"
 
-    # Stop any existing spam for this user on this specific bot
+    if store_command:
+        store_last_command(prefix, user_id, 'start', message=message, delay=delay)
+
+    # Stop existing spam
     if spam_key in spam_tasks:
         spam_tasks[spam_key].cancel()
         spam_tasks.pop(spam_key, None)
 
-    # Start the spam task - notify user via DM
-    if store_command:  # Only notify on original command, not restarts
+    # Store spam state for editing
+    spam_states[spam_key] = {'message': message, 'delay': delay, 'active': True}
+
+    if store_command:
         try:
-            await ctx.author.send(
-                f"🚀 Starting spam on {prefix} bot: '{message}' with {delay}s delay. Use `{prefix}stop` or `{prefix}spm stop` to stop."
-            )
+            await ctx.author.send(f"🚀 Starting spam on {prefix} bot: '{message}' ({delay}s delay)")
         except:
             pass
 
-    task = asyncio.create_task(
-        spam_loop_with_restart(ctx, message, delay, prefix))
+    task = asyncio.create_task(spam_loop_with_restart(ctx, message, delay, prefix))
     spam_tasks[spam_key] = task
 
     try:
@@ -392,516 +253,403 @@ async def execute_spm_command(ctx,
         pass
     finally:
         spam_tasks.pop(spam_key, None)
-
-
-def get_bot_by_user_id(user_id_str):
-    """Get bot by user ID or prefix"""
-    # Try to find by user ID first
-    for bot in bots.values():
-        if str(bot.user.id) == user_id_str:
-            return bot
-    
-    # Try to find by prefix
-    if user_id_str in bots:
-        return bots[user_id_str]
-    
-    return None
-
-
-async def save_allowed_users():
-    """Save allowed users to file"""
-    try:
-        async with aiofiles.open('allowed_users.json', 'w') as f:
-            await f.write(json.dumps(ALLOWED_USERS, indent=2))
-    except Exception as e:
-        print(f"Failed to save allowed users: {e}")
-
-
-async def load_allowed_users():
-    """Load allowed users from file"""
-    global ALLOWED_USERS
-    try:
-        async with aiofiles.open('allowed_users.json', 'r') as f:
-            content = await f.read()
-            ALLOWED_USERS = json.loads(content)
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        print(f"Failed to load allowed users: {e}")
-
+        spam_states.pop(spam_key, None)
 
 def create_bot(prefix: str, bot_name: str):
-    """Create a bot instance with the given prefix"""
-    # Using discord.py-self - no intents or self_bot needed
-    bot = commands.Bot(command_prefix=prefix)
+    """Create optimized self-bot instance"""
+    bot = commands.Bot(command_prefix=prefix, self_bot=True, help_command=None)
+    bot_prefixes[prefix] = bot  # Store reference for prefix changes
 
     @bot.event
     async def on_ready():
-        print(f"✅ {bot_name} logged in as {bot.user} (ID: {bot.user.id})")
-        print(
-            f"Bot is ready and listening for commands with prefix '{prefix}'")
-        print(f"Authorized users: {ALLOWED_USERS}")
-        
-        # Store bot prefix mapping
-        bot_prefixes[bot.user.id] = prefix
+        print(f"✅ {bot_name} online as {bot.user}")
 
     @bot.check
     async def is_allowed(ctx):
-        """Global check to ensure only authorized users can use bot commands"""
-        is_authorized = ctx.author.id in ALLOWED_USERS
-        # Debug: Print user ID for troubleshooting
-        if not is_authorized:
-            print(f"❌ Unauthorized user tried command: {ctx.author.id} (not in {ALLOWED_USERS})")
-        else:
-            print(f"✅ Authorized user {ctx.author.id} using command: {ctx.command}")
-        return is_authorized
+        return is_authorized(ctx.author.id)
 
     @bot.command()
     async def send(ctx, message: str, delay: float, amount: int):
-        """
-        Send a message multiple times with a specified delay between each message.
+        """Send message multiple times: {prefix}send "message" delay amount"""
+        if delay < MIN_DELAY:
+            return await ctx.author.send(f"⚠️ Min delay: {MIN_DELAY}s")
+        if not (1 <= amount <= MAX_AMOUNT):
+            return await ctx.author.send(f"⚠️ Amount: 1-{MAX_AMOUNT}")
+        if len(message) > 2000:
+            return await ctx.author.send("⚠️ Message too long (2000 char limit)")
 
-        Usage: {prefix}send [message] [delay] [amount]
-        Example: {prefix}send "Hello World" 1.0 5
-
-        Parameters:
-        - message: The message to send (use quotes for multi-word messages)
-        - delay: Delay in seconds between messages (minimum 0.5 seconds)
-        - amount: Number of times to send the message (1-20)
-        """
         try:
-            # Validate delay parameter
-            if delay < MIN_DELAY:
-                try:
-                    await ctx.author.send(
-                        f"⚠️ Delay must be at least {MIN_DELAY} seconds to prevent rate limiting."
-                    )
-                except:
-                    pass
-                return
-
-            # Validate amount parameter
-            if amount < 1 or amount > MAX_AMOUNT:
-                try:
-                    await ctx.author.send(
-                        f"⚠️ Amount must be between 1 and {MAX_AMOUNT} messages."
-                    )
-                except:
-                    pass
-                return
-
-            # Validate message length (Discord has a 2000 character limit)
-            if len(message) > 2000:
-                try:
-                    await ctx.author.send(
-                        "⚠️ Message is too long. Discord messages must be 2000 characters or less."
-                    )
-                except:
-                    pass
-                return
-
-            # Delete the invoking command message to keep chat clean
-            try:
-                await ctx.message.delete()
-            except discord.Forbidden:
-                pass
-            except Exception:
-                pass
-
-            await execute_send_command(ctx, message, delay, amount)
-
-        except ValueError:
-            try:
-                await ctx.author.send(
-                    f"⚠️ Invalid parameters. Please use: `{prefix}send [message] [delay] [amount]`\nExample: `{prefix}send \"Hello\" 1.0 5`"
-                )
-            except:
-                pass
-        except Exception as e:
-            try:
-                await ctx.author.send(f"⚠️ Error processing command: {e}")
-            except:
-                pass
+            await ctx.message.delete()
+        except:
+            pass
+        
+        await execute_send_command(ctx, message, delay, amount)
 
     @bot.command()
-    async def stop(ctx):
-        """
-        Stop any ongoing message sending for the user.
-
-        Usage: {prefix}stop
-        """
+    async def start(ctx, message: str = None, delay: float = 1.0):
+        """Start spam: {prefix}start "message" delay OR {prefix}start (uses stored message)"""
         user_id = ctx.author.id
-
-        # Stop regular send command
-        if user_id in stop_flags:
-            stop_flags[user_id] = True
-            try:
-                await ctx.author.send("🛑 Stopping message sending...")
-            except:
-                pass
-
-        # Stop spam command for this specific bot
         spam_key = f"{prefix}_{user_id}"
-        if spam_key in spam_tasks:
-            spam_tasks[spam_key].cancel()
-            spam_tasks.pop(spam_key, None)
-            try:
-                await ctx.author.send(
-                    f"🛑 Spam sending stopped on {prefix} bot.")
-            except:
-                pass
-
-        # Clear last command to prevent auto-restart
-        last_command_key = f"{prefix}_{user_id}"
-        if last_command_key in last_commands:
-            last_commands.pop(last_command_key, None)
-            try:
-                await ctx.author.send(
-                    f"🛑 Auto-restart disabled for {prefix} bot.")
-            except:
-                pass
-
-        # Remove from paused if it was paused
-        paused_spam.pop(spam_key, None)
-
-        if user_id not in stop_flags and spam_key not in spam_tasks:
-            try:
-                await ctx.author.send(
-                    f"ℹ️ No active message sending to stop on {prefix} bot.")
-            except:
-                pass
+        
+        # If no message provided, try to use stored message
+        if not message:
+            if spam_key in spam_states:
+                message = spam_states[spam_key]['message']
+                delay = spam_states[spam_key].get('delay', delay)
+            else:
+                return await ctx.author.send("⚠️ No message provided and no stored message found. Use: start \"message\" delay")
+        
+        if delay < MIN_DELAY:
+            return await ctx.author.send(f"⚠️ Min delay: {MIN_DELAY}s")
+        
+        try:
+            await ctx.message.delete()
+        except:
+            pass
+        
+        await execute_spm_command(ctx, prefix, message, delay)
 
     @bot.command()
     async def spm(ctx, action: str, message: str = None, delay: float = 1.0):
-        """
-        Continuous spam command with start/stop/pause/resume functionality.
-
-        Usage: {prefix}spm start [message] [delay]
-               {prefix}spm stop
-               {prefix}spm pause
-               {prefix}spm resume
-
-        Examples:
-        {prefix}spm start "Hello" 1.0
-        {prefix}spm pause
-        {prefix}spm resume
-        {prefix}spm stop
-        """
+        """Spam control: {prefix}spm start/stop "message" delay"""
         user_id = ctx.author.id
         spam_key = f"{prefix}_{user_id}"
 
         if action.lower() == "start":
             if not message:
-                try:
-                    await ctx.author.send(
-                        f"⚠️ Please provide a message to spam.\nUsage: `{prefix}spm start \"message\" [delay]`"
-                    )
-                except:
-                    pass
-                return
-
+                # Try to use stored message
+                if spam_key in spam_states:
+                    message = spam_states[spam_key]['message']
+                    delay = spam_states[spam_key].get('delay', delay)
+                else:
+                    return await ctx.author.send("⚠️ Need message to spam")
+            
             if delay < MIN_DELAY:
-                try:
-                    await ctx.author.send(
-                        f"⚠️ Delay must be at least {MIN_DELAY} seconds.")
-                except:
-                    pass
-                return
-
-            if len(message) > 2000:
-                try:
-                    await ctx.author.send(
-                        "⚠️ Message is too long. Discord messages must be 2000 characters or less."
-                    )
-                except:
-                    pass
-                return
-
-            # Delete the command message
+                return await ctx.author.send(f"⚠️ Min delay: {MIN_DELAY}s")
+            
             try:
                 await ctx.message.delete()
-            except Exception:
+            except:
                 pass
-
+            
             await execute_spm_command(ctx, prefix, message, delay)
 
         elif action.lower() == "stop":
             if spam_key in spam_tasks:
                 spam_tasks[spam_key].cancel()
                 spam_tasks.pop(spam_key, None)
+                spam_states.pop(spam_key, None)
                 try:
-                    await ctx.author.send(f"🛑 Spam stopped on {prefix} bot.")
+                    await ctx.author.send(f"🛑 Spam stopped on {prefix} bot")
                 except:
                     pass
-
-            # Clear last command to prevent auto-restart
-            last_command_key = f"{prefix}_{user_id}"
-            if last_command_key in last_commands:
-                last_commands.pop(last_command_key, None)
-                try:
-                    await ctx.author.send(
-                        f"🛑 Auto-restart disabled for {prefix} bot.")
-                except:
-                    pass
-
-            # Remove from paused if it was paused
-            paused_spam.pop(spam_key, None)
-
-            if spam_key not in spam_tasks:
-                try:
-                    await ctx.author.send(
-                        f"ℹ️ No active spam to stop on {prefix} bot.")
-                except:
-                    pass
-
-        elif action.lower() == "pause":
-            if spam_key in spam_tasks and spam_key not in paused_spam:
-                # Get current command info
-                last_command_key = f"{prefix}_{user_id}"
-                if last_command_key in last_commands:
-                    cmd_data = last_commands[last_command_key]
-                    paused_spam[spam_key] = (cmd_data.get('message', ''), cmd_data.get('delay', 1.0))
-                    try:
-                        await ctx.author.send(f"⏸️ Spam paused on {prefix} bot. Use `{prefix}spm resume` to continue.")
-                    except:
-                        pass
-                else:
-                    try:
-                        await ctx.author.send(f"⚠️ Could not pause spam - command info not found.")
-                    except:
-                        pass
-            elif spam_key in paused_spam:
-                try:
-                    await ctx.author.send(f"ℹ️ Spam is already paused on {prefix} bot.")
-                except:
-                    pass
-            else:
-                try:
-                    await ctx.author.send(f"ℹ️ No active spam to pause on {prefix} bot.")
-                except:
-                    pass
-
-        elif action.lower() == "resume":
-            if spam_key in paused_spam:
-                paused_spam.pop(spam_key, None)
-                try:
-                    await ctx.author.send(f"▶️ Spam resumed on {prefix} bot.")
-                except:
-                    pass
-            else:
-                try:
-                    await ctx.author.send(f"ℹ️ No paused spam to resume on {prefix} bot.")
-                except:
-                    pass
+            
+            # Clear restart data
+            last_key = f"{prefix}_{user_id}"
+            last_commands.pop(last_key, None)
 
         else:
-            try:
-                await ctx.author.send(
-                    f"⚠️ Invalid action. Use `start`, `stop`, `pause`, or `resume`.\nExample: `{prefix}spm start \"message\" 1.0`"
-                )
-            except:
-                pass
+            await ctx.author.send("⚠️ Use 'start' or 'stop'")
+
+    @bot.command()
+    async def stop(ctx):
+        """Stop all activities for this user on this bot"""
+        user_id = ctx.author.id
+        spam_key = f"{prefix}_{user_id}"
+
+        # Stop send command
+        if user_id in stop_flags:
+            stop_flags[user_id] = True
+
+        # Stop spam
+        if spam_key in spam_tasks:
+            spam_tasks[spam_key].cancel()
+            spam_tasks.pop(spam_key, None)
+            spam_states.pop(spam_key, None)
+
+        # Clear restart data
+        last_commands.pop(f"{prefix}_{user_id}", None)
+
+        try:
+            await ctx.author.send(f"🛑 All activities stopped on {prefix} bot")
+        except:
+            pass
 
     @bot.command()
     async def restart(ctx):
-        """
-        Manually restart the last command that was running on this bot.
-
-        Usage: {prefix}restart
-        """
+        """Manually restart last command"""
         user_id = ctx.author.id
         key = f"{prefix}_{user_id}"
 
         if key not in last_commands:
-            try:
-                await ctx.author.send(
-                    f"ℹ️ No previous command to restart on {prefix} bot.")
-            except:
-                pass
-            return
+            return await ctx.author.send("ℹ️ No command to restart")
 
-        # Reset attempt counter for manual restart
         last_commands[key]['attempts'] = 0
-
-        try:
-            await ctx.author.send(
-                f"🔄 Manually restarting last command on {prefix} bot...")
-        except:
-            pass
-
+        await ctx.author.send(f"🔄 Restarting last command...")
         await restart_last_command(ctx, prefix)
 
     @bot.command()
+    async def change(ctx, old_prefix: str, new_prefix: str):
+        """Change bot prefix: {prefix}change old_prefix new_prefix"""
+        if old_prefix == prefix and old_prefix in bot_prefixes:
+            if new_prefix in bot_prefixes:
+                return await ctx.author.send(f"❌ Prefix '{new_prefix}' already exists")
+            
+            # Update the bot's prefix
+            bot.command_prefix = new_prefix
+            
+            # Update global references
+            bot_prefixes[new_prefix] = bot_prefixes.pop(old_prefix)
+            bots[new_prefix] = bots.pop(old_prefix, bot)
+            
+            if old_prefix in bot_tokens:
+                bot_tokens[new_prefix] = bot_tokens.pop(old_prefix)
+            
+            try:
+                await ctx.author.send(f"✅ Changed prefix from '{old_prefix}' to '{new_prefix}'")
+            except:
+                pass
+        else:
+            await ctx.author.send(f"❌ Cannot change prefix for {old_prefix} from {prefix} bot")
+
+    @bot.command(name='help')
     async def help_bot(ctx):
-        """Display help information about bot commands"""
-        help_message = f"""🤖 **Discord Bot Help** (Prefix: {prefix})
-Available commands for authorized users:
+        """Show help for this bot"""
+        help_text = f"""🤖 **Self-Bot Help** (Prefix: {prefix})
 
-**`{prefix}send [message] [delay] [amount]`**
-Send a message multiple times with delay
-• message: Text to send (use quotes for spaces)
-• delay: Seconds between messages (min {MIN_DELAY})
-• amount: Number of repetitions (max {MAX_AMOUNT})
-Example: `{prefix}send "Hello World" 1.0 3`
+**Basic Commands:**
+• `{prefix}send "message" delay amount` - Send message multiple times
+• `{prefix}start "message" delay` - Start spam
+• `{prefix}start` - Start spam with last/edited message
+• `{prefix}spm start "message" delay` - Start spam (alternative)
+• `{prefix}spm stop` - Stop spam
+• `{prefix}stop` - Stop all activities
+• `{prefix}restart` - Restart last command
+• `{prefix}change {prefix} new_prefix` - Change this bot's prefix
 
-**`{prefix}spm start [message] [delay]`**
-Start continuous spam (infinite messages until stopped)
-• message: Text to spam (use quotes for spaces)
-• delay: Seconds between messages (min {MIN_DELAY})
-Example: `{prefix}spm start "Spam message" 0.5`
+**Management Commands:**
+• `>addbot token prefix` - Add new bot
+• `>edit prefix "new message"` - Edit active spam message
+• `>allow userid` - Add authorized user
+• `>revoke userid` - Remove authorized user
+• `>stopall` - Emergency stop all bots
 
-**`{prefix}spm pause/resume/stop`**
-Control continuous spam
-• pause: Temporarily pause spam
-• resume: Resume paused spam
-• stop: Stop spam completely
+**Limits:** Min delay {MIN_DELAY}s, Max amount {MAX_AMOUNT}
 
-**`{prefix}stop`**
-Stop any active message sending (works for both send and spm)
-Also disables auto-restart for this bot
-
-**`{prefix}restart`**
-Manually restart the last command that was running
-
-**Global Commands (work with any bot):**
-**`>stopall`**
-🚨 EMERGENCY STOP - Immediately stops ALL bots and commands
-
-**`>addbot [token]`**
-Add a new bot with automatic prefix assignment
-
-**`>edit [bot_user_id/prefix] "new message"`**
-Edit the current spam message of any bot
-Examples: `>edit $ "new message"` or `>edit 123456789 "new message"`
-
-**`>allow [user_id]`**
-Add user to allowed users list
-
-**`>revoke [user_id]`**
-Remove user from allowed users list
-
-**`>retry [bot_user_id/prefix]`**
-Retry the last command on specified bot in original channel
-
-**`>changeprefix [bot_user_id] [new_prefix]`**
-Change prefix of any bot
-
-**Auto-Restart Features**
-• Commands automatically restart after errors (max {MAX_RESTART_ATTEMPTS} attempts)
-• {RESTART_DELAY} second delay before restart attempts
-• Manual restart available with `{prefix}restart`
-• Auto-restart disabled when using stop commands
-
-**Safety Features**
-• Minimum delay: {MIN_DELAY} seconds
-• User authorization required
-• Individual stop controls per user
-• Emergency stop for all bots
-• Automatic command cleanup
-
-Bot is running 24/7 on Replit with keep-alive monitoring"""
-
-        await ctx.send(help_message)
+**Note:** This is a self-bot system. Commands work across all configured bots."""
+        
+        try:
+            await ctx.send(help_text)
+        except:
+            await ctx.author.send(help_text)
 
     @bot.event
     async def on_message(message):
-        """Handle global commands and regular commands"""
-        global emergency_stop, ALLOWED_USERS
+        """Handle special commands and regular processing"""
+        global emergency_stop
 
-        # Ignore bot messages
-        if message.author.bot:
+        if not is_authorized(message.author.id):
             return
 
-        # Check for emergency stopall command
-        if message.content == ">stopall" and message.author.id in ALLOWED_USERS:
+        content = message.content
+
+        # Emergency stop all
+        if content == ">stopall":
             emergency_stop = True
-
-            # Cancel all active spam tasks
-            for spam_key, task in list(spam_tasks.items()):
+            
+            # Cancel all tasks
+            for task in list(spam_tasks.values()):
                 task.cancel()
-                spam_tasks.pop(spam_key, None)
-
-            # Set all stop flags
+            spam_tasks.clear()
+            spam_states.clear()
+            
+            # Set stop flags
             for user_id in list(stop_flags.keys()):
                 stop_flags[user_id] = True
-
-            # Clear all last commands to prevent auto-restart
+                
             last_commands.clear()
             
-            # Clear paused spam
-            paused_spam.clear()
-
             try:
-                await message.author.send(
-                    "🚨 EMERGENCY STOP ACTIVATED - All bots stopped! Auto-restart disabled for all commands."
-                )
+                await message.author.send("🚨 EMERGENCY STOP - All bots stopped!")
             except:
                 pass
-
-            # Reset emergency stop after a brief moment to allow for new commands
+            
             await asyncio.sleep(1)
             emergency_stop = False
             return
 
-        # Check for addbot command
-        if message.content.startswith(">addbot ") and message.author.id in ALLOWED_USERS:
-            parts = message.content.split(" ", 1)
-            if len(parts) != 2:
-                try:
-                    await message.author.send("⚠️ Usage: `>addbot [token]`")
-                except:
-                    pass
-                return
-
-            token = parts[1].strip()
-            
-            # Find an available prefix
-            used_prefixes = set(BOT_CONFIGS.values())
-            available_prefixes = ["#", "&", "%", "@", "*", "+", "=", "-", "_", "~", "`", "^"]
-            
-            new_prefix = None
-            for prefix_option in available_prefixes:
-                if prefix_option not in used_prefixes:
-                    new_prefix = prefix_option
-                    break
-            
-            if not new_prefix:
-                try:
-                    await message.author.send("❌ No available prefixes. All prefixes are in use.")
-                except:
-                    pass
-                return
-
-            try:
-                # Create and start new bot
-                bot_name = f"Bot-{new_prefix}"
-                new_bot = create_bot(new_prefix, bot_name)
-                
-                # Add to configurations
-                token_name = f"TOKEN_{new_prefix.replace('#', 'HASH').replace('&', 'AMP').replace('%', 'PERCENT').replace('@', 'AT').replace('*', 'STAR').replace('+', 'PLUS').replace('=', 'EQUALS').replace('-', 'DASH').replace('_', 'UNDER').replace('~', 'TILDE').replace('`', 'TICK').replace('^', 'CARET')}"
-                BOT_CONFIGS[token_name] = new_prefix
-                bots[new_prefix] = new_bot
-                
-                # Start the bot
-                asyncio.create_task(new_bot.start(token))
-                
-                try:
-                    await message.author.send(f"✅ Bot added successfully with prefix `{new_prefix}`! Bot will be online shortly.")
-                except:
-                    pass
-                
-            except Exception as e:
-                try:
-                    await message.author.send(f"❌ Failed to add bot: {str(e)}")
-                except:
-                    pass
-            return
-
-        # Check for edit command
-        if message.content.startswith(">edit ") and message.author.id in ALLOWED_USERS:
-            parts = message.content.split(" ", 2)
+        # Add new bot
+        if content.startswith(">addbot "):
+            parts = content.split(maxsplit=2)
             if len(parts) != 3:
                 try:
-                    await message.author.send("⚠️ Usage: `>edit [bot_user_id/prefix] \"new message\"`")
+                    await message.author.send("Usage: >addbot token prefix")
                 except:
                     pass
+                return
+            
+            token, new_prefix = parts[1], parts[2]
+            
+            if new_prefix in bots:
+                try:
+                    await message.author.send(f"❌ Prefix '{new_prefix}' already exists")
+                except:
+                    pass
+                return
+            
+            try:
+                new_bot = create_bot(new_prefix, f"Bot-{new_prefix}")
+                bots[new_prefix] = new_bot
+                bot_tokens[new_prefix] = token
+                
+                # Start the new bot
+                asyncio.create_task(new_bot.start(token))
+                
+                await message.author.send(f"✅ Bot added with prefix '{new_prefix}' - Starting...")
+            except Exception as e:
+                await message.author.send(f"❌ Failed to add bot: {e}")
+            return
+
+        # Edit spam message
+        if content.startswith(">edit "):
+            parts = content.split(maxsplit=2)
+            if len(parts) != 3:
+                try:
+                    await message.author.send("Usage: >edit prefix \"new message\"")
+                except:
+                    pass
+                return
+            
+            target_prefix, new_message = parts[1], parts[2].strip('"')
+            user_id = message.author.id
+            spam_key = f"{target_prefix}_{user_id}"
+            
+            # Allow editing even when spam is stopped - create/update spam state
+            if spam_key not in spam_states:
+                # Create new spam state if none exists
+                spam_states[spam_key] = {'message': new_message, 'delay': 1.0, 'active': False}
+                try:
+                    await message.author.send(f"✅ Set {target_prefix} bot spam message: '{new_message}' (use {target_prefix}start to begin)")
+                except:
+                    pass
+            else:
+                # Update existing spam state
+                spam_states[spam_key]['message'] = new_message
+                if spam_key in spam_tasks:
+                    # Active spam - will update automatically
+                    try:
+                        await message.author.send(f"✅ Updated {target_prefix} bot active spam message")
+                    except:
+                        pass
+                else:
+                    # Stopped spam - ready for restart
+                    try:
+                        await message.author.send(f"✅ Updated {target_prefix} bot spam message: '{new_message}' (use {target_prefix}start to begin)")
+                    except:
+                        pass
+            return
+
+        # User management
+        if content.startswith(">allow "):
+            try:
+                user_id = int(content.split()[1])
+                if user_id not in ALLOWED_USERS:
+                    ALLOWED_USERS.append(user_id)
+                    await save_user_data()
+                    await message.author.send(f"✅ Added user {user_id}")
+                else:
+                    await message.author.send(f"ℹ️ User {user_id} already authorized")
+            except (ValueError, IndexError):
+                await message.author.send("Usage: >allow userid")
+            return
+
+        if content.startswith(">revoke "):
+            try:
+                user_id = int(content.split()[1])
+                if user_id in ALLOWED_USERS:
+                    ALLOWED_USERS.remove(user_id)
+                    await save_user_data()
+                    await message.author.send(f"✅ Removed user {user_id}")
+                else:
+                    await message.author.send(f"ℹ️ User {user_id} not in authorized list")
+            except (ValueError, IndexError):
+                await message.author.send("Usage: >revoke userid")
+            return
+
+        await bot.process_commands(message)
+
+    @bot.event
+    async def on_command_error(ctx, error):
+        """Simplified error handling"""
+        if isinstance(error, commands.CheckFailure):
+            return
+        
+        if is_authorized(ctx.author.id):
+            if isinstance(error, commands.CommandNotFound):
+                return  # Ignore command not found for self-bots
+            
+            error_msg = str(error)
+            try:
+                await ctx.author.send(f"⚠️ {error_msg}")
+            except:
+                print(f"Command error: {error_msg}")
+
+    return bot
+
+async def run_multiple_bots():
+    """Run all configured self-bots"""
+    await load_user_data()
+    
+    # Hardcoded tokens (replace with your actual tokens)
+    HARDCODED_TOKENS = {
+        "TOKEN": "",
+        "TOKEN2": "",
+        "TOKEN3": ""
+    }
+
+    bot_tasks = []
+    
+    for token_name, prefix in BOT_CONFIGS.items():
+        token = HARDCODED_TOKENS.get(token_name) or os.getenv(token_name)
+        if token:
+            bot = create_bot(prefix, f"Self-Bot-{prefix}")
+            bots[prefix] = bot
+            bot_tokens[prefix] = token
+            
+            task = asyncio.create_task(bot.start(token))
+            bot_tasks.append(task)
+            print(f"🚀 Starting {prefix} self-bot")
+        else:
+            print(f"⚠️ No token for {prefix} self-bot")
+
+    if not bot_tasks:
+        print("❌ No valid tokens found")
+        return
+
+    try:
+        await asyncio.gather(*bot_tasks)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+if __name__ == "__main__":
+    keep_alive()
+    
+    print("🤖 Optimized Discord Self-Bot Multi-System")
+    print("=" * 50)
+    print("Features:")
+    print("• prefix + start - Start spam with message/delay or use stored")
+    print("• prefix + restart - Restart last command (now remembers properly)")
+    print("• prefix + change old new - Change bot prefix")
+    print("• >addbot token prefix - Add bots dynamically")
+    print("• >edit prefix \"message\" - Edit spam messages")
+    print("• >allow/revoke userid - Manage users")
+    print("• Auto-restart system with memory")
+    print("• Cross-bot command execution")
+    print("=" * 50)
+
+    try:
+        asyncio.run(run_multiple_bots())
+    except KeyboardInterrupt:
+        print("\n🛑 Shutting down...")
+    except Exception as e:
+        print(f"❌ Startup error: {e}")
