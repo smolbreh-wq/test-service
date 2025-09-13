@@ -372,6 +372,7 @@ def create_bot(prefix: str, bot_name: str):
 • `{prefix}spm stop` - Stop spam
 • `{prefix}stop` - Stop all activities
 • `{prefix}restart` - Restart last command
+• `{prefix}change old_prefix new_prefix` - Change bot prefix
 
 **Management Commands:**
 • `>addbot token prefix` - Add new bot
