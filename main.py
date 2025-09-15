@@ -580,7 +580,30 @@ async def handle_keyword_message(message, bot_prefix):
         
         # Check forum threads - if message is in a thread, check if parent forum is monitored
         if not is_monitored and hasattr(message.channel, 'parent') and message.channel.parent:
-            is_monitored = message.channel.parent.id == channel_id
+            parent_channel = message.channel.parent
+            
+            # Only monitor if parent forum is being monitored
+            if parent_channel.id == channel_id:
+                # For forum channels, only check thread starter messages (new posts), not replies
+                if hasattr(parent_channel, 'type') and str(parent_channel.type) == 'forum':
+                    # Check if this is the first message in the thread (new post)
+                    # Thread starter messages have type thread_starter_message or are the first message
+                    is_new_post = (
+                        hasattr(message, 'type') and
+                        hasattr(message.type, 'name') and
+                        message.type.name == 'thread_starter_message'
+                    ) or (
+                        # Fallback: check if it's the first message by comparing with thread creation
+                        hasattr(message.channel, 'created_at') and
+                        abs((message.created_at - message.channel.created_at).total_seconds()) < 2
+                    )
+                    
+                    if is_new_post:
+                        is_monitored = True
+                        print(f"🆕 New forum post detected in {parent_channel.name}: {message.content[:50]}...")
+                else:
+                    # Regular thread in non-forum channel
+                    is_monitored = True
         
         if not is_monitored:
             continue
@@ -625,8 +648,13 @@ async def handle_keyword_message(message, bot_prefix):
                     # Determine channel type and info
                     channel_info = f"#{message.channel.name}"
                     if hasattr(message.channel, 'parent') and message.channel.parent:
-                        # It's a thread
-                        channel_info = f"🧵 {message.channel.name}\n📁 *in #{message.channel.parent.name}*"
+                        parent_channel = message.channel.parent
+                        # Check if it's a forum channel
+                        if hasattr(parent_channel, 'type') and str(parent_channel.type) == 'forum':
+                            channel_info = f"📝 **New Post:** {message.channel.name}\n📁 *in Forum #{parent_channel.name}*"
+                        else:
+                            # Regular thread
+                            channel_info = f"🧵 {message.channel.name}\n📁 *in #{parent_channel.name}*"
                     
                     # Format better DM message
                     dm_content = f"""🎯 **KEYWORD DETECTED**
@@ -819,15 +847,24 @@ async def stop_bot_tasks(prefix: str):
     tasks_stopped = 0
     
     # Stop spam tasks for this bot
-    keys_to_remove = []
+    spam_keys_to_remove = []
     for spam_key in spam_tasks:
         if spam_key.startswith(f"{prefix}_"):
             spam_tasks[spam_key].cancel()
-            keys_to_remove.append(spam_key)
+            spam_keys_to_remove.append(spam_key)
             tasks_stopped += 1
     
-    for key in keys_to_remove:
+    for key in spam_keys_to_remove:
         spam_tasks.pop(key, None)
+    
+    # Clear spam configurations for this bot
+    spam_config_keys_to_remove = []
+    for spam_key in spam_configs:
+        if spam_key.startswith(f"{prefix}_"):
+            spam_config_keys_to_remove.append(spam_key)
+    
+    for key in spam_config_keys_to_remove:
+        spam_configs.pop(key, None)
     
     # Stop regular send commands by setting stop flags
     for user_id in stop_flags:
@@ -854,6 +891,7 @@ async def stop_bot_tasks(prefix: str):
     
     await save_listening_configs()
     
+    print(f"🛑 Stopped {tasks_stopped} tasks for bot {prefix}")
     return tasks_stopped
 
 
@@ -896,9 +934,14 @@ def create_bot(prefix: str, bot_name: str):
                 emergency_stop = True
 
                 # Cancel all active spam tasks
+                tasks_cancelled = 0
                 for spam_key, task in list(spam_tasks.items()):
                     task.cancel()
                     spam_tasks.pop(spam_key, None)
+                    tasks_cancelled += 1
+
+                # Clear all spam configurations
+                spam_configs.clear()
 
                 # Set all stop flags
                 for user_id_flag in list(stop_flags.keys()):
@@ -909,10 +952,15 @@ def create_bot(prefix: str, bot_name: str):
 
                 try:
                     await message.author.send(
-                        "🚨 EMERGENCY STOP ACTIVATED - All bots stopped! Auto-restart disabled for all commands."
+                        f"🚨 EMERGENCY STOP ACTIVATED - All bots stopped!\n"
+                        f"✅ Cancelled {tasks_cancelled} spam tasks\n"
+                        f"✅ Cleared all configurations\n"
+                        f"✅ Auto-restart disabled for all commands"
                     )
                 except:
                     pass
+
+                print(f"🚨 Emergency stop executed by user {user_id}: {tasks_cancelled} tasks cancelled")
 
                 # Reset emergency stop after a brief moment to allow for new commands
                 await asyncio.sleep(1)
@@ -1346,6 +1394,10 @@ def create_bot(prefix: str, bot_name: str):
         if spam_key in spam_tasks:
             spam_tasks[spam_key].cancel()
             spam_tasks.pop(spam_key, None)
+            
+            # Also clear spam config
+            spam_configs.pop(spam_key, None)
+            
             try:
                 await ctx.author.send(
                     f"🛑 Spam sending stopped on {prefix} bot.")
@@ -1414,6 +1466,10 @@ def create_bot(prefix: str, bot_name: str):
             if spam_key in spam_tasks:
                 spam_tasks[spam_key].cancel()
                 spam_tasks.pop(spam_key, None)
+                
+                # Also clear spam config
+                spam_configs.pop(spam_key, None)
+                
                 try:
                     await ctx.author.send(f"🛑 Spam stopped on {prefix} bot.")
                 except:
@@ -1782,56 +1838,191 @@ def create_bot(prefix: str, bot_name: str):
                 pass
 
     @bot.command()
-    async def help_bot(ctx):
-        """Display help information about bot commands"""
-        help_message = f"""🤖 **Discord Bot Help** (Prefix: {prefix})
-Available commands:
+    async def help(ctx, category: str = None):
+        """Display categorized help information"""
+        if category is None:
+            # Show main help with categories
+            help_message = f"""🤖 **Discord Multi-Bot Help** (Prefix: {prefix})
 
-**Basic Commands:**
+**📋 Available Categories:**
+• `{prefix}help basic` - Message sending & control
+• `{prefix}help editing` - Live spam editing
+• `{prefix}help reactions` - Multi-bot reactions
+• `{prefix}help keywords` - Keyword monitoring
+• `{prefix}help system` - Emergency & info commands
+• `{prefix}help management` - Bot management
+
+**🔥 Quick Commands:**
+• `{prefix}send "message" 1.0 5` - Send message 5 times
+• `{prefix}spm start "text" 0.5` - Start continuous spam
+• `{prefix}react "😀,🔥" 10 [link] 0.5` - Multi-bot reactions
+• `{prefix}listento y n "keyword" [channel]` - Monitor keywords
+
+**⚡ Emergency:** `>stopall` stops everything instantly
+
+Type `{prefix}help [category]` for detailed commands."""
+            
+            await ctx.author.send(help_message)
+            return
+        
+        category = category.lower()
+        
+        if category == "basic":
+            help_message = f"""📤 **Basic Commands** (Prefix: {prefix})
+
 **`{prefix}send [message] [delay] [amount]`**
-Example: `{prefix}send "Hello World" 1.0 3`
+Send a message multiple times with delay
+• Example: `{prefix}send "Hello" 1.0 5`
+• Min delay: {MIN_DELAY}s, Max amount: {MAX_AMOUNT}
 
 **`{prefix}spm start [message] [delay]`**
-Example: `{prefix}spm start "Spam message" 0.5`
+Start continuous spam (runs until stopped)
+• Example: `{prefix}spm start "Spam text" 0.5`
+• Use quotes for multi-word messages
 
 **`{prefix}spm stop`** / **`{prefix}stop`**
-
-**`{prefix}editspam [action] [value]`**
-Edit running spam: message, delay, pause, resume, status
-Example: `{prefix}editspam message "new text"`
+Stop all active messaging for your user
+• Stops both send and spam commands
+• Disables auto-restart
 
 **`{prefix}restart`**
+Manually restart your last command
+• Useful if bot got disconnected
+• Resets attempt counter"""
+            
+        elif category == "editing":
+            help_message = f"""⚙️ **Spam Editing Commands** (Prefix: {prefix})
 
-**Multi-Bot Reaction Commands:**
-**`{prefix}react "emoji1,emoji2" [num_reactions] [message_link] [delay]`**
-Example: `{prefix}react "😀,😎,🔥" 5 https://discord.com/channels/123/456/789 0.5`
-*(Uses ALL active bots to add reactions)*
+**`{prefix}editspam message "new text"`**
+Change spam message while running
+• Updates immediately without restart
+• Use quotes for multi-word messages
 
-**Keyword Listening Commands:**
-**`{prefix}listento [case_sensitive] [word_match] "keywords" [channel_link]`**
-Example: `{prefix}listento y n "hello,test" https://discord.com/channels/123/456`
+**`{prefix}editspam delay 1.5`**
+Change spam delay while running
+• Min delay: {MIN_DELAY} seconds
+• Applied to next message
+
+**`{prefix}editspam pause`**
+Temporarily pause spam (keeps config)
+• Spam stays configured but stops sending
+
+**`{prefix}editspam resume`**
+Resume paused spam
+• Continues with current settings
+
+**`{prefix}editspam status`**
+View current spam configuration
+• Shows message, delay, active status"""
+            
+        elif category == "reactions":
+            help_message = f"""⚡ **Multi-Bot Reactions** (Prefix: {prefix})
+
+**`{prefix}react "emoji1,emoji2" [count] [link] [delay]`**
+Add reactions using ALL active bots
+• Example: `{prefix}react "😀,🔥,💯" 15 https://discord.com/... 0.3`
+• Distributes reactions across all bots
+• Max reactions: 100 per command
+• Min delay: 0.1 seconds
+
+**📝 Usage Tips:**
+• Separate emojis with commas
+• Reactions cycle through emoji list
+• Each bot adds reactions in turns
+• Better rate limit handling
+
+**🔗 Message Links:**
+• Right-click → Copy Message Link
+• Or use direct message ID"""
+            
+        elif category == "keywords":
+            help_message = f"""🎯 **Keyword Monitoring** (Prefix: {prefix})
+
+**`{prefix}listento [case] [word] "keywords" [channel]`**
+Monitor channel for keywords, get DM alerts
+• Example: `{prefix}listento y n "hello,test" https://discord.com/channels/...`
+• case: y/n (case sensitive matching)
+• word: y/n (whole words only vs partial)
 
 **`{prefix}stoplisten [channel_link]`**
+Stop monitoring a channel
+• Only works for listeners you created
 
-**`{prefix}editlisten [case_sensitive] [word_match] "keywords" [channel_link]`**
+**`{prefix}editlisten [case] [word] "keywords" [channel]`**
+Update existing keyword listener
+• Same format as listento command
 
-**System Commands**:
+**📋 Features:**
+• Works in forum channels (new posts only)
+• Monitors threads in regular channels
+• Rich DM notifications with context
+• Persistent across bot restarts"""
+            
+        elif category == "system":
+            help_message = f"""🚨 **System Commands** (Global)
+
 **`>stopall`**
-🚨 EMERGENCY STOP
+🚨 EMERGENCY STOP - Stops ALL bots immediately
+• Cancels all spam tasks across all bots
+• Clears all configurations
+• Disables auto-restart
 
 **`>showallbots`**
+List all active bots and their types
+• Shows hardcoded and dynamic bots
+• Displays bot IDs and prefixes
 
+**📊 Info:**
+• System commands work from any bot
+• Only authorized users can use them
+• Immediate effect across all instances
+• Console logging for debugging"""
+            
+        elif category == "management":
+            help_message = f"""🔧 **Bot Management** (Global)
 
-**Bot Management Commands:**
 **`>addbot [prefix] [token]`**
+Add new bot dynamically
+• Example: `>addbot & MTAxNDM4...`
+• Bot starts immediately if token valid
+
 **`>removebot [prefix]`**
-**`>changeprefix [old_prefix] [new_prefix]`**
-**`>adduser [user_ID] [prefix]`**
-**`>removeuser [user_ID] [prefix]`**
+Remove dynamic bot completely
+• Stops all tasks for that bot
+• Cannot remove hardcoded bots
 
-Bot runs 24/7 with keep-alive monitoring."""
+**`>changeprefix [old] [new]`**
+Change dynamic bot prefix
+• Example: `>changeprefix & %`
+• Restarts bot with new prefix
 
-        await ctx.send(help_message)
+**`>adduser [userID] [prefix]`** / **`>removeuser [userID] [prefix]`**
+Manage bot-specific authorized users
+• Gives/removes access to specific bot
+• Does not affect global permissions"""
+            
+        else:
+            help_message = f"""❌ **Unknown Category:** `{category}`
+
+**📋 Available Categories:**
+• `basic` - Message sending & control
+• `editing` - Live spam editing
+• `reactions` - Multi-bot reactions
+• `keywords` - Keyword monitoring
+• `system` - Emergency & info commands
+• `management` - Bot management
+
+Use `{prefix}help [category]` for detailed help."""
+        
+        # Check message length
+        if len(help_message) > 1800:
+            help_message = help_message[:1750] + "\n*(Message truncated)*"
+        
+        try:
+            await ctx.author.send(help_message)
+        except:
+            # Fallback to channel if DM fails
+            await ctx.send(help_message)
 
     @bot.event
     async def on_command_error(ctx, error):
