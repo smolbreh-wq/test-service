@@ -34,6 +34,9 @@ stop_flags = {}
 bots = {}
 emergency_stop = False
 
+# Spam configuration tracking
+spam_configs = {}  # Store spam configurations per bot+user: {f"{prefix}_{user_id}": {"message": str, "delay": float}}
+
 # Auto-restart functionality
 last_commands = {
 }  # Track last command per user per bot: {f"{prefix}_{user_id}": command_data}
@@ -240,11 +243,16 @@ async def execute_send_command(ctx,
         last_commands.pop(key, None)
 
 
-async def spam_loop_with_restart(ctx, message: str, delay: float, prefix: str):
-    """Continuous spam loop with restart capability"""
+async def spam_loop_with_restart(ctx, initial_message: str, initial_delay: float, prefix: str):
+    """Continuous spam loop with restart capability and live editing"""
     global emergency_stop
     count = 0
     user_id = ctx.author.id
+    spam_key = f"{prefix}_{user_id}"
+    
+    # Current values (can be updated during execution)
+    current_message = initial_message
+    current_delay = initial_delay
 
     try:
         while True:
@@ -257,9 +265,38 @@ async def spam_loop_with_restart(ctx, message: str, delay: float, prefix: str):
                     pass
                 break
 
+            # Check for configuration updates
+            if spam_key in spam_configs:
+                config = spam_configs[spam_key]
+                if not config.get("active", True):
+                    # Spam was paused
+                    await asyncio.sleep(1)
+                    continue
+                
+                # Update message and delay if changed
+                new_message = config.get("message", current_message)
+                new_delay = config.get("delay", current_delay)
+                
+                if new_message != current_message:
+                    current_message = new_message
+                    try:
+                        await ctx.author.send(f"📝 Spam message updated to: '{current_message}'")
+                    except:
+                        pass
+                
+                if new_delay != current_delay:
+                    current_delay = new_delay
+                    try:
+                        await ctx.author.send(f"⏱️ Spam delay updated to: {current_delay}s")
+                    except:
+                        pass
+            else:
+                # Config was deleted, stop spam
+                break
+
             # ---- 503 resilience inside spam loop ----
             try:
-                await ctx.send(message)
+                await ctx.send(current_message)
                 count += 1
             except discord.errors.DiscordServerError as e:
                 if getattr(e, "status", None) == 503:
@@ -286,7 +323,7 @@ async def spam_loop_with_restart(ctx, message: str, delay: float, prefix: str):
                 raise
             # -----------------------------------------
 
-            await asyncio.sleep(delay)
+            await asyncio.sleep(current_delay)
     except asyncio.CancelledError:
         try:
             await ctx.author.send(f"🛑 Spam stopped after {count} messages.")
@@ -324,6 +361,13 @@ async def execute_spm_command(ctx,
     # Create unique key for this bot and user combination
     spam_key = f"{prefix}_{user_id}"
 
+    # Store spam configuration
+    spam_configs[spam_key] = {
+        "message": message,
+        "delay": delay,
+        "active": True
+    }
+
     # Stop any existing spam for this user on this specific bot
     if spam_key in spam_tasks:
         spam_tasks[spam_key].cancel()
@@ -333,7 +377,7 @@ async def execute_spm_command(ctx,
     if store_command:  # Only notify on original command, not restarts
         try:
             await ctx.author.send(
-                f"🚀 Starting spam on {prefix} bot: '{message}' with {delay}s delay. Use `{prefix}stop` or `{prefix}spm stop` to stop."
+                f"🚀 Starting spam on {prefix} bot: '{message}' with {delay}s delay. Use `{prefix}stop`, `{prefix}spm stop`, or `{prefix}editspam` to control."
             )
         except:
             pass
@@ -348,6 +392,8 @@ async def execute_spm_command(ctx,
         pass
     finally:
         spam_tasks.pop(spam_key, None)
+        # Clean up spam config when task ends
+        spam_configs.pop(spam_key, None)
 
 
 def check_user_authorization(user_id: int, prefix: str = None) -> bool:
@@ -528,7 +574,15 @@ async def handle_keyword_message(message, bot_prefix):
             continue
         
         channel_id = int(listener_key.split('_', 1)[1])
-        if message.channel.id != channel_id:
+        
+        # Check direct channel match
+        is_monitored = message.channel.id == channel_id
+        
+        # Check forum threads - if message is in a thread, check if parent forum is monitored
+        if not is_monitored and hasattr(message.channel, 'parent') and message.channel.parent:
+            is_monitored = message.channel.parent.id == channel_id
+        
+        if not is_monitored:
             continue
         
         # Check for keyword match
@@ -565,17 +619,30 @@ async def handle_keyword_message(message, bot_prefix):
                 if user:
                     # Truncate long messages to prevent Discord limits
                     message_content = message.content
-                    if len(message_content) > 1500:
-                        message_content = message_content[:1500] + "... (truncated)"
+                    if len(message_content) > 800:
+                        message_content = message_content[:800] + "... *(truncated)*"
                     
-                    dm_content = f"🔍 **Keyword Alert**\n"
-                    dm_content += f"**Matched Keyword:** {matched_keyword}\n"
-                    dm_content += f"**Author:** {message.author.name} ({message.author.id})\n"
-                    dm_content += f"**Channel:** #{message.channel.name}\n"
-                    if message.guild:
-                        dm_content += f"**Server:** {message.guild.name}\n"
-                    dm_content += f"**Message:** {message_content}\n"
-                    dm_content += f"**Link:** {message_link}"
+                    # Determine channel type and info
+                    channel_info = f"#{message.channel.name}"
+                    if hasattr(message.channel, 'parent') and message.channel.parent:
+                        # It's a thread
+                        channel_info = f"🧵 {message.channel.name}\n📁 *in #{message.channel.parent.name}*"
+                    
+                    # Format better DM message
+                    dm_content = f"""🎯 **KEYWORD DETECTED**
+━━━━━━━━━━━━━━━━━━━━━━━
+
+**🔑 Keyword:** `{matched_keyword}`
+**👤 Author:** {message.author.display_name} (`{message.author.name}`)
+**📍 Location:** {channel_info}
+**🏠 Server:** {message.guild.name if message.guild else 'DM'}
+
+**💬 Message:**
+```
+{message_content}
+```
+
+**🔗 [Jump to Message](<{message_link}>)**"""
                     
                     # SELF-BOT FIX: Create DM channel and send
                     dm_channel = user.dm_channel
@@ -583,7 +650,7 @@ async def handle_keyword_message(message, bot_prefix):
                         dm_channel = await user.create_dm()
                     
                     await dm_channel.send(dm_content)
-                    print(f"✅ Sent keyword alert to user {user_id} for keyword '{matched_keyword}'")
+                    print(f"✅ Sent keyword alert to user {user_id} for keyword '{matched_keyword}' in {channel_info}")
                     
             except Exception as e:
                 print(f"❌ Failed to send keyword alert DM to {user_id}: {e}")
@@ -617,63 +684,6 @@ async def setup_keyword_listener(bot, channel_id: int, config: dict):
         return False, f"Error setting up listener: {str(e)}"
 
 
-    """
-    Start listening for keywords in a channel - SELF-BOT VERSION
-    
-    Usage: {prefix}listento [y/n] [y/n] "keyword1,keyword2" [channel_link]
-    Example: {prefix}listento y n "hello,world" https://discord.com/channels/123/456
-    """
-    user_id = ctx.author.id
-    
-    # Parse case sensitivity
-    case_sensitive = case_sensitive.lower() == 'y'
-    word_match = word_match.lower() == 'y'
-    
-    # Parse keywords
-    keyword_list = [kw.strip() for kw in keywords.split(',')]
-    
-    # Parse channel link
-    server_id, channel_id = parse_channel_link(channel_link)
-    
-    if not channel_id:
-        await ctx.send("❌ Invalid channel link or channel ID")
-        return
-    
-    # Set up keyword listener config
-    config = {
-        'user_id': user_id,
-        'keywords': keyword_list,
-        'case_sensitive': case_sensitive,
-        'word_match': word_match,
-        'channel_id': channel_id,
-        'created_at': datetime.now().isoformat()
-    }
-    
-    success, message_result = await setup_keyword_listener(ctx.bot, channel_id, config)
-    
-    if success:
-        settings_str = f"Case-sensitive: {'Yes' if case_sensitive else 'No'}, Word match: {'Yes' if word_match else 'No'}"
-        response = f"✅ {message_result}\n**Keywords:** {', '.join(keyword_list)}\n**Settings:** {settings_str}\n**Monitoring User:** {ctx.author.name}"
-        
-        # For self-bot, send response in channel or DM
-        if ctx.guild:  # If in a server, try to DM
-            try:
-                await ctx.author.send(response)
-                await ctx.message.add_reaction("✅")  # React to original message
-            except:
-                await ctx.send(response)  # Fallback to channel
-        else:  # If in DMs, respond in DMs
-            await ctx.send(response)
-    else:
-        error_msg = f"❌ Failed to set up listener: {message_result}"
-        if ctx.guild:
-            try:
-                await ctx.author.send(error_msg)
-                await ctx.message.add_reaction("❌")
-            except:
-                await ctx.send(error_msg)
-        else:
-            await ctx.send(error_msg)
 
 
 # SELF-BOT DEBUG: Add this function to test if keyword matching works
@@ -936,55 +946,6 @@ def create_bot(prefix: str, bot_name: str):
                     pass
                 return
 
-            # Multi-bot reaction command
-            elif content.startswith(">react"):
-                parts = content.split(" ", 3)
-                if len(parts) < 4:
-                    try:
-                        await message.author.send("Usage: `>react {emoji1,emoji2} {num_reactions} {message_link} [delay]`")
-                    except:
-                        pass
-                    return
-                
-                try:
-                    emoji_str = parts[1]
-                    num_reactions = int(parts[2])
-                    message_link = parts[3]
-                    delay = 1.0  # default delay
-                    
-                    # Parse optional delay
-                    if len(parts) > 4:
-                        delay = float(parts[4])
-                    
-                    # Parse emojis
-                    emojis = [emoji.strip() for emoji in emoji_str.split(',')]
-                    
-                    if num_reactions <= 0 or num_reactions > 100:
-                        try:
-                            await message.author.send("❌ Number of reactions must be between 1 and 100")
-                        except:
-                            pass
-                        return
-                    
-                    # Start multi-bot reaction task
-                    asyncio.create_task(multi_bot_react(emojis, num_reactions, message_link, delay, user_id))
-                    
-                    try:
-                        await message.author.send(f"🚀 Starting multi-bot reactions: {num_reactions} reactions with {delay}s delay")
-                    except:
-                        pass
-                
-                except ValueError:
-                    try:
-                        await message.author.send("❌ Invalid number format. Use: `>react {emojis} {number} {message_link} [delay]`")
-                    except:
-                        pass
-                except Exception as e:
-                    try:
-                        await message.author.send(f"❌ Reaction command error: {str(e)}")
-                    except:
-                        pass
-                return
 
             # Add bot command
             elif content.startswith(">addbot"):
@@ -1671,6 +1632,156 @@ def create_bot(prefix: str, bot_name: str):
             pass
 
     @bot.command()
+    async def react(ctx, emojis: str, num_reactions: int, message_link: str, delay: float = 1.0):
+        """
+        Add reactions to a message using ALL active bots (multi-bot reactions)
+        
+        Usage: {prefix}react "emoji1,emoji2" [num_reactions] [message_link] [delay]
+        Example: {prefix}react "😀,😎,🔥" 5 https://discord.com/channels/123/456/789 0.5
+        """
+        user_id = ctx.author.id
+        
+        try:
+            # Validate parameters
+            if num_reactions <= 0 or num_reactions > 100:
+                await ctx.author.send("❌ Number of reactions must be between 1 and 100")
+                return
+            
+            if delay < 0.1:
+                await ctx.author.send("❌ Delay must be at least 0.1 seconds")
+                return
+            
+            # Parse emojis
+            emoji_list = [emoji.strip() for emoji in emojis.split(',')]
+            
+            # Parse message link
+            server_id, channel_id, message_id = parse_message_link(message_link)
+            
+            if not message_id:
+                await ctx.author.send("❌ Invalid message link or message ID")
+                return
+            
+            # Start multi-bot reaction task
+            try:
+                await ctx.author.send(f"🚀 Starting multi-bot reactions: {num_reactions} reactions with {delay}s delay across all active bots")
+                asyncio.create_task(multi_bot_react(emoji_list, num_reactions, message_link, delay, user_id))
+            except Exception as e:
+                await ctx.author.send(f"❌ Failed to start multi-bot reactions: {str(e)}")
+                
+        except ValueError:
+            await ctx.author.send(f"❌ Invalid number format. Use: `{prefix}react \"emojis\" number message_link [delay]`")
+        except Exception as e:
+            await ctx.author.send(f"❌ Reaction command error: {str(e)}")
+
+    @bot.command()
+    async def editspam(ctx, action: str, new_value: str = None):
+        """
+        Edit running spam configuration or pause/resume spam
+        
+        Usage: {prefix}editspam message "new message"
+               {prefix}editspam delay 1.5
+               {prefix}editspam pause
+               {prefix}editspam resume
+               {prefix}editspam status
+        """
+        user_id = ctx.author.id
+        spam_key = f"{prefix}_{user_id}"
+        
+        # Check if spam config exists
+        if spam_key not in spam_configs:
+            try:
+                await ctx.author.send(f"❌ No active spam found on {prefix} bot. Start spam first with `{prefix}spm start`.")
+            except:
+                pass
+            return
+        
+        config = spam_configs[spam_key]
+        action = action.lower()
+        
+        if action == "message":
+            if not new_value:
+                try:
+                    await ctx.author.send(f"❌ Please provide a new message. Usage: `{prefix}editspam message \"new message\"`")
+                except:
+                    pass
+                return
+            
+            config["message"] = new_value
+            try:
+                await ctx.author.send(f"✅ Spam message will be updated to: '{new_value}'")
+            except:
+                pass
+        
+        elif action == "delay":
+            if not new_value:
+                try:
+                    await ctx.author.send(f"❌ Please provide a new delay. Usage: `{prefix}editspam delay 1.5`")
+                except:
+                    pass
+                return
+            
+            try:
+                new_delay = float(new_value)
+                if new_delay < MIN_DELAY:
+                    try:
+                        await ctx.author.send(f"❌ Delay must be at least {MIN_DELAY} seconds")
+                    except:
+                        pass
+                    return
+                
+                config["delay"] = new_delay
+                try:
+                    await ctx.author.send(f"✅ Spam delay will be updated to: {new_delay}s")
+                except:
+                    pass
+            except ValueError:
+                try:
+                    await ctx.author.send("❌ Invalid delay value. Must be a number.")
+                except:
+                    pass
+        
+        elif action == "pause":
+            config["active"] = False
+            try:
+                await ctx.author.send(f"⏸️ Spam paused on {prefix} bot. Use `{prefix}editspam resume` to continue.")
+            except:
+                pass
+        
+        elif action == "resume":
+            config["active"] = True
+            try:
+                await ctx.author.send(f"▶️ Spam resumed on {prefix} bot.")
+            except:
+                pass
+        
+        elif action == "status":
+            is_active = config.get("active", True)
+            status = "🟢 Active" if is_active else "🟡 Paused"
+            try:
+                await ctx.author.send(
+                    f"📊 **Spam Status on {prefix} bot:**\n"
+                    f"**Status:** {status}\n"
+                    f"**Message:** '{config['message']}'\n"
+                    f"**Delay:** {config['delay']}s\n"
+                    f"**Running:** {'Yes' if spam_key in spam_tasks else 'No'}"
+                )
+            except:
+                pass
+        
+        else:
+            try:
+                await ctx.author.send(
+                    f"❌ Invalid action. Available actions:\n"
+                    f"• `{prefix}editspam message \"new text\"`\n"
+                    f"• `{prefix}editspam delay 1.5`\n"
+                    f"• `{prefix}editspam pause`\n"
+                    f"• `{prefix}editspam resume`\n"
+                    f"• `{prefix}editspam status`"
+                )
+            except:
+                pass
+
+    @bot.command()
     async def help_bot(ctx):
         """Display help information about bot commands"""
         help_message = f"""🤖 **Discord Bot Help** (Prefix: {prefix})
@@ -1685,7 +1796,16 @@ Example: `{prefix}spm start "Spam message" 0.5`
 
 **`{prefix}spm stop`** / **`{prefix}stop`**
 
+**`{prefix}editspam [action] [value]`**
+Edit running spam: message, delay, pause, resume, status
+Example: `{prefix}editspam message "new text"`
+
 **`{prefix}restart`**
+
+**Multi-Bot Reaction Commands:**
+**`{prefix}react "emoji1,emoji2" [num_reactions] [message_link] [delay]`**
+Example: `{prefix}react "😀,😎,🔥" 5 https://discord.com/channels/123/456/789 0.5`
+*(Uses ALL active bots to add reactions)*
 
 **Keyword Listening Commands:**
 **`{prefix}listento [case_sensitive] [word_match] "keywords" [channel_link]`**
@@ -1696,9 +1816,6 @@ Example: `{prefix}listento y n "hello,test" https://discord.com/channels/123/456
 **`{prefix}editlisten [case_sensitive] [word_match] "keywords" [channel_link]`**
 
 **System Commands**:
-**`>react [emojis] [num_reactions] [message_link] [delay]`**
-Example: `>react 😀,😎,🔥 5 https://discord.com/channels/123/456/789 0.5`
-
 **`>stopall`**
 🚨 EMERGENCY STOP
 
@@ -2050,5 +2167,3 @@ if __name__ == "__main__":
         print("\n🛑 Shutting down all bots...")
     except Exception as e:
         print(f"❌ Failed to start bots: {e}")
-
-
