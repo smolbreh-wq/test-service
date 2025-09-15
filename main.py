@@ -1540,70 +1540,43 @@ def create_bot(prefix: str, bot_name: str):
     async def help_bot(ctx):
         """Display help information about bot commands"""
         help_message = f"""🤖 **Discord Bot Help** (Prefix: {prefix})
-Available commands for authorized users:
+Available commands:
 
 **Basic Commands:**
 **`{prefix}send [message] [delay] [amount]`**
-Send a message multiple times with delay
-• message: Text to send (use quotes for spaces)
-• delay: Seconds between messages (min {MIN_DELAY})
-• amount: Number of repetitions (max {MAX_AMOUNT})
 Example: `{prefix}send "Hello World" 1.0 3`
 
 **`{prefix}spm start [message] [delay]`**
-Start continuous spam (infinite messages until stopped)
 Example: `{prefix}spm start "Spam message" 0.5`
 
 **`{prefix}spm stop`** / **`{prefix}stop`**
-Stop any active message sending or spam
 
 **`{prefix}restart`**
-Manually restart the last command that was running
 
 **Keyword Listening Commands:**
 **`{prefix}listento [case_sensitive] [word_match] "keywords" [channel_link]`**
-Start listening for keywords in a channel
-• case_sensitive: y/n for case sensitivity
-• word_match: y/n for whole word matching
-• keywords: Comma-separated list in quotes
-• channel_link: Discord channel URL or channel ID
 Example: `{prefix}listento y n "hello,test" https://discord.com/channels/123/456`
 
 **`{prefix}stoplisten [channel_link]`**
-Stop listening in a specific channel
 
 **`{prefix}editlisten [case_sensitive] [word_match] "keywords" [channel_link]`**
-Edit existing keyword listener settings
 
-**System Commands** (Available to all authorized users):
+**System Commands**:
 **`>react [emojis] [num_reactions] [message_link] [delay]`**
-Add reactions using multiple bots
-• emojis: Comma-separated emoji list
-• num_reactions: Number of reactions to add
-• message_link: Discord message URL or message ID  
-• delay: Optional delay between reactions (default: 1s)
 Example: `>react 😀,😎,🔥 5 https://discord.com/channels/123/456/789 0.5`
 
 **`>stopall`**
-🚨 EMERGENCY STOP - Immediately stops ALL bots and commands
+🚨 EMERGENCY STOP
 
 **`>showallbots`**
-Show all active bots and their prefixes
+
 
 **Bot Management Commands:**
-**`>addbot [prefix] [token]`** - Add new bot dynamically
-**`>removebot [prefix]`** - Remove dynamic bot
-**`>changeprefix [old_prefix] [new_prefix]`** - Change dynamic bot prefix
-**`>adduser [user_ID] [prefix]`** - Add authorized user for specific bot
-**`>removeuser [user_ID] [prefix]`** - Remove authorized user
-
-**Features:**
-• Auto-restart after errors (max {MAX_RESTART_ATTEMPTS} attempts)
-• Multi-bot reaction distribution
-• Real-time keyword monitoring with DMs
-• Support for forum channels
-• Individual user authorization per bot
-• Emergency stop functionality
+**`>addbot [prefix] [token]`**
+**`>removebot [prefix]`**
+**`>changeprefix [old_prefix] [new_prefix]`**
+**`>adduser [user_ID] [prefix]`**
+**`>removeuser [user_ID] [prefix]`**
 
 Bot runs 24/7 with keep-alive monitoring."""
 
@@ -1943,3 +1916,4 @@ if __name__ == "__main__":
         print("\n🛑 Shutting down all bots...")
     except Exception as e:
         print(f"❌ Failed to start bots: {e}")
+
