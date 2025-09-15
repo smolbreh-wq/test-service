@@ -1984,13 +1984,24 @@ async def run_multiple_bots():
         # Use hardcoded token first, fallback to environment variable
         token = HARDCODED_TOKENS.get(token_name) or os.getenv(token_name)
         if token and token != f"YOUR_{token_name.split('TOKEN')[0]}DISCORD_TOKEN_HERE":
-            bot = create_bot(prefix, f"Bot-{prefix}")
-            bots[prefix] = bot  # Store by prefix for easier access
+            try:
+                bot = create_bot(prefix, f"Bot-{prefix}")
+                
+                # Check if bot was created successfully
+                if bot is None:
+                    print(f"❌ Failed to create bot with prefix '{prefix}' - bot creation returned None")
+                    continue
+                
+                bots[prefix] = bot  # Store by prefix for easier access
 
-            # Create a task for this bot
-            task = asyncio.create_task(bot.start(token))
-            bot_tasks.append(task)
-            print(f"🚀 Starting hardcoded bot with prefix '{prefix}' using {token_name}")
+                # Create a task for this bot
+                task = asyncio.create_task(bot.start(token))
+                bot_tasks.append(task)
+                print(f"🚀 Starting hardcoded bot with prefix '{prefix}' using {token_name}")
+                
+            except Exception as e:
+                print(f"❌ Failed to create/start hardcoded bot '{prefix}': {e}")
+                continue
         else:
             print(
                 f"⚠️ {token_name} not found or using placeholder, skipping bot with prefix '{prefix}'"
@@ -2001,14 +2012,22 @@ async def run_multiple_bots():
         token = bot_data['token']
         try:
             bot = create_bot(prefix, f"DynamicBot-{prefix}")
+            
+            # Check if bot was created successfully
+            if bot is None:
+                print(f"❌ Failed to create dynamic bot with prefix '{prefix}' - bot creation returned None")
+                continue
+                
             bots[prefix] = bot
 
             # Create a task for this bot
             task = asyncio.create_task(bot.start(token))
             bot_tasks.append(task)
             print(f"🚀 Starting dynamic bot with prefix '{prefix}'")
+            
         except Exception as e:
             print(f"❌ Failed to start dynamic bot '{prefix}': {e}")
+            continue
 
     if not bot_tasks:
         print(
@@ -2017,13 +2036,13 @@ async def run_multiple_bots():
         return
 
     print(f"📊 Loaded {len(listening_configs)} keyword listeners from previous session")
+    print(f"✅ Successfully started {len(bot_tasks)} bot(s)")
 
     # Wait for all bots to finish (they should run indefinitely)
     try:
         await asyncio.gather(*bot_tasks, return_exceptions=True)
     except Exception as e:
         print(f"❌ Error running bots: {e}")
-
 
 if __name__ == "__main__":
     # Start the Flask keep-alive server
@@ -2084,3 +2103,4 @@ if __name__ == "__main__":
         print("\n🛑 Shutting down all bots...")
     except Exception as e:
         print(f"❌ Failed to start bots: {e}")
+
