@@ -36,6 +36,7 @@ emergency_stop = False
 
 # Spam configuration tracking
 spam_configs = {}  # Store spam configurations per bot+user: {f"{prefix}_{user_id}": {"message": str, "delay": float}}
+multi_spam_configs = {}  # Store multi-spam configurations per user: {user_id: {"message": str, "delay": float, "num_bots": int}}
 
 # Auto-restart functionality
 last_commands = {
@@ -340,6 +341,60 @@ async def spam_loop_with_restart(ctx, initial_message: str, initial_delay: float
         except:
             pass
         raise
+
+
+async def multi_spam_loop(ctx, message: str, delay: float, bot_prefix: str, bot_index: int, total_bots: int):
+    """Multi-bot spam loop - bots send in sequence then wait"""
+    global emergency_stop
+    count = 0
+    user_id = ctx.author.id
+    
+    try:
+        while True:
+            if emergency_stop:
+                break
+            
+            # Check if multi-spam is still active
+            if user_id not in multi_spam_configs or not multi_spam_configs[user_id].get("active", True):
+                break
+            
+            # Update config if changed
+            config = multi_spam_configs[user_id]
+            current_message = config.get("message", message)
+            current_delay = config.get("delay", delay)
+            
+            # Calculate when this bot should send (sequence timing)
+            sequence_delay = bot_index * 0.1  # 100ms between each bot in sequence
+            await asyncio.sleep(sequence_delay)
+            
+            try:
+                await ctx.send(current_message)
+                count += 1
+            except discord.errors.DiscordServerError as e:
+                if getattr(e, "status", None) == 503:
+                    await asyncio.sleep(3)
+                    continue
+                else:
+                    raise
+            except discord.HTTPException as e:
+                if getattr(e, "status", None) == 503:
+                    await asyncio.sleep(3)
+                    continue
+                else:
+                    raise
+            except Exception as e:
+                print(f"Multi-spam error on bot {bot_prefix}: {e}")
+                raise
+            
+            # Wait for the full delay minus the sequence time already used
+            remaining_delay = current_delay - sequence_delay
+            if remaining_delay > 0:
+                await asyncio.sleep(remaining_delay)
+                
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        print(f"Multi-spam loop error on bot {bot_prefix}: {e}")
 
 
 async def execute_spm_command(ctx,
@@ -1607,6 +1662,297 @@ def create_bot(prefix: str, bot_name: str):
                 pass
 
     @bot.command()
+    async def multispm(ctx, action: str, num_bots: int = None, message: str = None, total_delay: float = 1.0, channel_link: str = None):
+        """
+        Multi-bot spam with evenly distributed delays
+        
+        Usage: {prefix}multispm start [num_bots] [message] [total_delay] [channel_link]
+               {prefix}multispm stop
+        
+        Examples:
+        {prefix}multispm start 3 "Hello" 1.5 - Uses 3 bots with 0.5s delay each
+        {prefix}multispm stop - Stops multi-bot spam
+        """
+        user_id = ctx.author.id
+        
+        if action.lower() == "start":
+            if not num_bots or not message:
+                try:
+                    await ctx.author.send(
+                        f"⚠️ Usage: `{prefix}multispm start [num_bots] \"message\" [total_delay] [channel_link]`\n"
+                        f"Example: `{prefix}multispm start 3 \"Hello\" 1.5`"
+                    )
+                except:
+                    pass
+                return
+            
+            # Get active bots
+            active_bots = [bot for bot in bots.values() if bot.user]
+            if len(active_bots) < num_bots:
+                try:
+                    await ctx.author.send(f"❌ Only {len(active_bots)} bots available, but {num_bots} requested.")
+                except:
+                    pass
+                return
+            
+            # Validate delay (per bot, not divided)
+            if total_delay < MIN_DELAY:
+                try:
+                    await ctx.author.send(f"❌ Delay must be at least {MIN_DELAY} seconds per bot.")
+                except:
+                    pass
+                return
+            
+            # Parse target channel if provided
+            target_channel = ctx.channel
+            if channel_link:
+                server_id, channel_id, message_id = parse_message_link(channel_link)
+                if not channel_id:
+                    server_id, channel_id = parse_channel_link(channel_link)
+                
+                if channel_id:
+                    try:
+                        target_channel = ctx.bot.get_channel(channel_id)
+                        if not target_channel:
+                            target_channel = await ctx.bot.fetch_channel(channel_id)
+                    except:
+                        await ctx.author.send("❌ Could not access the specified channel")
+                        return
+                else:
+                    await ctx.author.send("❌ Invalid channel link provided")
+                    return
+            
+            # Store multi-spam configuration (global for this user)
+            multi_spam_configs[user_id] = {
+                "message": message,
+                "delay": total_delay,
+                "active": True,
+                "num_bots": num_bots,
+                "channel_id": target_channel.id
+            }
+            
+            # Start spam on selected bots
+            selected_bots = active_bots[:num_bots]
+            started_count = 0
+            
+            for i, bot in enumerate(selected_bots):
+                try:
+                    bot_prefix = bot.command_prefix
+                    spam_key = f"{bot_prefix}_{user_id}"
+                    
+                    # Stop existing spam for this bot+user
+                    if spam_key in spam_tasks:
+                        spam_tasks[spam_key].cancel()
+                        spam_tasks.pop(spam_key, None)
+                    
+                    # Store spam configuration (individual bot config)
+                    spam_configs[spam_key] = {
+                        "message": message,
+                        "delay": total_delay,
+                        "active": True,
+                        "multi_spam": True,
+                        "bot_index": i  # Index in sequence
+                    }
+                    
+                    # Create mock context for target channel
+                    class MockContext:
+                        def __init__(self, original_ctx, target_channel, bot):
+                            self.bot = bot
+                            self.author = original_ctx.author
+                            self.channel = target_channel
+                            self.guild = target_channel.guild if hasattr(target_channel, 'guild') else None
+                            self.message = original_ctx.message
+                            
+                        async def send(self, content):
+                            return await self.channel.send(content)
+                    
+                    mock_ctx = MockContext(ctx, target_channel, bot)
+                    
+                    # Start spam task with sequence logic
+                    task = asyncio.create_task(
+                        multi_spam_loop(mock_ctx, message, total_delay, bot_prefix, i, num_bots))
+                    spam_tasks[spam_key] = task
+                    started_count += 1
+                    
+                except Exception as e:
+                    print(f"Failed to start spam on bot {bot.command_prefix}: {e}")
+            
+            # Notify user
+            try:
+                channel_name = f"#{target_channel.name}" if hasattr(target_channel, 'name') else "current channel"
+                await ctx.author.send(
+                    f"🚀 **Multi-Bot Spam Started**\n"
+                    f"**Bots Used:** {started_count}/{num_bots}\n"
+                    f"**Message:** '{message}'\n"
+                    f"**Delay Per Bot:** {total_delay}s\n"
+                    f"**Sequence:** Bot1→Bot2→Bot3→wait {total_delay}s→repeat\n"
+                    f"**Target:** {channel_name}\n"
+                    f"Use `{prefix}multispm stop` to stop all."
+                )
+            except:
+                pass
+        
+        elif action.lower() == "stop":
+            # Stop all multi-spam tasks for this user
+            stopped_count = 0
+            for spam_key in list(spam_tasks.keys()):
+                if spam_key.endswith(f"_{user_id}") and spam_configs.get(spam_key, {}).get("multi_spam"):
+                    spam_tasks[spam_key].cancel()
+                    spam_tasks.pop(spam_key, None)
+                    spam_configs.pop(spam_key, None)
+                    stopped_count += 1
+            
+            # Clear multi-spam config
+            multi_spam_configs.pop(user_id, None)
+            
+            try:
+                if stopped_count > 0:
+                    await ctx.author.send(f"🛑 Stopped multi-bot spam on {stopped_count} bots.")
+                else:
+                    await ctx.author.send(f"ℹ️ No active multi-bot spam to stop.")
+            except:
+                pass
+        
+        else:
+            try:
+                await ctx.author.send(
+                    f"⚠️ Invalid action. Use `start` or `stop`.\n"
+                    f"Example: `{prefix}multispm start 3 \"Hello\" 1.5`"
+                )
+            except:
+                pass
+
+    @bot.command()
+    async def editmultispm(ctx, action: str, new_value: str = None):
+        """
+        Edit running multi-bot spam configuration
+        
+        Usage: {prefix}editmultispm message "new message"
+               {prefix}editmultispm delay 1.5
+               {prefix}editmultispm pause
+               {prefix}editmultispm resume
+               {prefix}editmultispm status
+        """
+        user_id = ctx.author.id
+        
+        # Check if multi-spam config exists
+        if user_id not in multi_spam_configs:
+            try:
+                await ctx.author.send(f"❌ No active multi-bot spam found. Start with `{prefix}multispm start` first.")
+            except:
+                pass
+            return
+        
+        config = multi_spam_configs[user_id]
+        action = action.lower()
+        
+        if action == "message":
+            if not new_value:
+                try:
+                    await ctx.author.send(f"❌ Please provide a new message. Usage: `{prefix}editmultispm message \"new message\"`")
+                except:
+                    pass
+                return
+            
+            config["message"] = new_value
+            # Update all individual bot configs
+            for spam_key in spam_configs:
+                if spam_key.endswith(f"_{user_id}") and spam_configs[spam_key].get("multi_spam"):
+                    spam_configs[spam_key]["message"] = new_value
+            
+            try:
+                await ctx.author.send(f"✅ Multi-bot spam message will be updated to: '{new_value}'")
+            except:
+                pass
+        
+        elif action == "delay":
+            if not new_value:
+                try:
+                    await ctx.author.send(f"❌ Please provide a new delay. Usage: `{prefix}editmultispm delay 1.5`")
+                except:
+                    pass
+                return
+            
+            try:
+                new_delay = float(new_value)
+                if new_delay < MIN_DELAY:
+                    try:
+                        await ctx.author.send(f"❌ Delay must be at least {MIN_DELAY} seconds")
+                    except:
+                        pass
+                    return
+                
+                config["delay"] = new_delay
+                # Update all individual bot configs
+                for spam_key in spam_configs:
+                    if spam_key.endswith(f"_{user_id}") and spam_configs[spam_key].get("multi_spam"):
+                        spam_configs[spam_key]["delay"] = new_delay
+                
+                try:
+                    await ctx.author.send(f"✅ Multi-bot spam delay will be updated to: {new_delay}s per bot")
+                except:
+                    pass
+            except ValueError:
+                try:
+                    await ctx.author.send("❌ Invalid delay value. Must be a number.")
+                except:
+                    pass
+        
+        elif action == "pause":
+            config["active"] = False
+            # Update all individual bot configs
+            for spam_key in spam_configs:
+                if spam_key.endswith(f"_{user_id}") and spam_configs[spam_key].get("multi_spam"):
+                    spam_configs[spam_key]["active"] = False
+            
+            try:
+                await ctx.author.send(f"⏸️ Multi-bot spam paused. Use `{prefix}editmultispm resume` to continue.")
+            except:
+                pass
+        
+        elif action == "resume":
+            config["active"] = True
+            # Update all individual bot configs
+            for spam_key in spam_configs:
+                if spam_key.endswith(f"_{user_id}") and spam_configs[spam_key].get("multi_spam"):
+                    spam_configs[spam_key]["active"] = True
+            
+            try:
+                await ctx.author.send(f"▶️ Multi-bot spam resumed.")
+            except:
+                pass
+        
+        elif action == "status":
+            is_active = config.get("active", True)
+            status = "🟢 Active" if is_active else "🟡 Paused"
+            running_count = sum(1 for key in spam_tasks if key.endswith(f"_{user_id}") and spam_configs.get(key, {}).get("multi_spam"))
+            
+            try:
+                await ctx.author.send(
+                    f"📊 **Multi-Bot Spam Status:**\n"
+                    f"**Status:** {status}\n"
+                    f"**Message:** '{config['message']}'\n"
+                    f"**Delay Per Bot:** {config['delay']}s\n"
+                    f"**Total Bots:** {config['num_bots']}\n"
+                    f"**Running Bots:** {running_count}/{config['num_bots']}"
+                )
+            except:
+                pass
+        
+        else:
+            try:
+                await ctx.author.send(
+                    f"❌ Invalid action. Available actions:\n"
+                    f"• `{prefix}editmultispm message \"new text\"`\n"
+                    f"• `{prefix}editmultispm delay 1.5`\n"
+                    f"• `{prefix}editmultispm pause`\n"
+                    f"• `{prefix}editmultispm resume`\n"
+                    f"• `{prefix}editmultispm status`"
+                )
+            except:
+                pass
+
+    @bot.command()
     async def restart(ctx):
         """
         Manually restart the last command that was running on this bot.
@@ -2212,7 +2558,10 @@ async def handle_account_generation(message):
 
     try:
         await message.author.send(
-            f"🔄 Starting account generation for prefix '{prefix}'...\nThis may take 5-10 minutes. You'll be notified when complete."
+            f"🆓 Starting FREE account generation for prefix '{prefix}'...\n"
+            f"📧 Using temporary email services\n"
+            f"🤖 Enhanced stealth browser automation\n"
+            f"⏱️ This may take 5-15 minutes. You'll be notified when complete."
         )
     except:
         pass
@@ -2223,13 +2572,17 @@ async def handle_account_generation(message):
 
 
 async def generate_and_deploy_account(prefix, user_id):
-    """Generate account and deploy new bot"""
+    """Generate account and deploy new bot using FREE services"""
     global generated_accounts, generation_tasks, BOT_CONFIGS, bots
 
     try:
-        # Generate account
+        # Import the free generator
+        from account_generator import account_generator
+        
+        # Generate account using free services only
+        print(f"🆓 Starting FREE account generation for prefix '{prefix}'...")
         result = await account_generator.generate_account(use_temp_email=True,
-                                                          use_sms=True)
+                                                          use_sms=False)
 
         if result['success']:
             token = result['token']
@@ -2287,9 +2640,18 @@ async def generate_and_deploy_account(prefix, user_id):
                         continue
 
                 if user:
-                    await user.send(
-                        f"❌ Account generation failed: {result.get('error', 'Unknown error')}"
-                    )
+                    error_msg = result.get('error', 'Unknown error')
+                    partial_success = result.get('partial_success', False)
+                    
+                    if partial_success:
+                        await user.send(
+                            f"⚠️ **Partial Success** - Account created but needs manual token extraction\n"
+                            f"📧 Email: {result.get('email', 'N/A')}\n"
+                            f"📝 Username: {result.get('credentials', {}).get('username', 'N/A')}\n"
+                            f"🔑 Please extract token manually and use `>addbot {prefix} [token]`"
+                        )
+                    else:
+                        await user.send(f"❌ Account generation failed: {error_msg}")
             except:
                 pass
 
@@ -2424,13 +2786,13 @@ if __name__ == "__main__":
     captcha_key = HARDCODED_API_KEYS.get("CAPTCHA_API_KEY") or os.getenv(
         'CAPTCHA_API_KEY')
 
-    print("Account Generation Services:")
-    print(
-        f"  SMS Service: {'✅ Ready' if sms_key else '❌ Missing SMS_ACTIVATE_API_KEY'}"
-    )
-    print(
-        f"  CAPTCHA Service: {'✅ Ready' if captcha_key else '❌ Missing CAPTCHA_API_KEY'}"
-    )
+    print("Account Generation Services (FREE MODE):")
+    print("  ✅ Multiple Temp Email Providers (1secmail, Guerrilla, TempMail)")
+    print("  ✅ Free Proxy Rotation")
+    print("  ✅ Undetected Chrome Driver")
+    print("  ✅ Manual CAPTCHA Solving Mode")
+    print("  ✅ Enhanced Stealth Features")
+    print("  ⚠️ No SMS verification (email-only accounts)")
     print()
 
     print("Configured hardcoded bots:")
@@ -2447,15 +2809,17 @@ if __name__ == "__main__":
     print("  >adduser [user_ID] [prefix] - Add authorized user for specific bot")
     print("  >removeuser [user_ID] [prefix] - Remove authorized user from specific bot")
     print("  >showallbots - Show all active bots")
-    print("  >react [emojis] [num_reactions] [message_link] [delay] - Multi-bot reactions")
-    print("  >generate account [prefix] - Generate new Discord account and bot")
+    print("  >generate account [prefix] - Generate FREE Discord account and bot")
     print("  >stopall - Emergency stop all bots")
     print()
-    print("New Features:")
-    print("  Keyword Listening - Monitor channels for specific keywords with customizable matching")
-    print("  Multi-Bot Reactions - Distribute reactions across all active bots")
-    print("  Dynamic Prefix Changes - Change bot prefixes without restart")
-    print("  Enhanced Error Handling - Better resilience and auto-restart capabilities")
+    print("FREE Features:")
+    print("  🆓 Account Generation - No paid SMS/CAPTCHA services needed")
+    print("  🎯 Keyword Listening - Monitor channels for keywords (forum support)")
+    print("  ⚡ Multi-Bot Reactions - Distribute reactions across all active bots")
+    print("  🔄 Dynamic Bot Management - Add/remove bots without restart")
+    print("  🛡️ Enhanced Stealth - Undetected browser automation")
+    print("  📧 Multi-Provider Temp Emails - 1secmail, Guerrilla, TempMail")
+    print("  🌐 Free Proxy Rotation - Automatic IP changing")
     print("=" * 70)
 
     try:
