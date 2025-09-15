@@ -1542,9 +1542,12 @@ def create_bot(prefix: str, bot_name: str):
         
         # If specific command help is requested
         if command:
-            command_help = get_command_help(command, prefix)
-            if command_help:
-                await ctx.send(command_help)
+            part1, part2 = get_command_help(command, prefix)
+            if part1 and "not found" not in part1:
+                await ctx.send(part1)
+                if part2:
+                    await asyncio.sleep(1)
+                    await ctx.send(part2)
             else:
                 await ctx.send(f"❌ Command `{command}` not found")
             return
@@ -1622,133 +1625,148 @@ Use `{prefix}help_bot [command]` for detailed usage"""
     return None
 
 
-def get_command_help(command: str, prefix: str) -> str:
-    """Get detailed help for a specific command"""
+def get_command_help(command: str, prefix: str) -> tuple:
+    """Get detailed help for a specific command - returns (part1, part2)"""
     
     cmd = command.lower().replace(prefix, "").replace(">", "")
     
     commands_help = {
-        "send": f"""**{prefix}send** - Send message multiple times
+        "send": (
+            f"""**{prefix}send** - Send message multiple times
 
 **Usage:** `{prefix}send [message] [delay] [amount]`
-**Example:** `{prefix}send "Hello World" 1.0 5`
-
-**Parameters:**
-• message: Text to send (use quotes for spaces)
-• delay: Seconds between messages (min {MIN_DELAY})
-• amount: Number of repetitions (1-{MAX_AMOUNT})""",
-
-        "spm": f"""**{prefix}spm** - Continuous spam control
+**Example:** `{prefix}send "Hello World" 1.0 5`""",
+            f"""**Parameters:**
+- message: Text to send (use quotes for spaces)
+- delay: Seconds between messages (min {MIN_DELAY})
+- amount: Number of repetitions (1-{MAX_AMOUNT})"""
+        ),
+        
+        "spm": (
+            f"""**{prefix}spm** - Continuous spam control
 
 **Usage:** 
 `{prefix}spm start [message] [delay]`
-`{prefix}spm stop`
-
-**Examples:**
+`{prefix}spm stop`""",
+            f"""**Examples:**
 `{prefix}spm start "Spam text" 0.5`
 `{prefix}spm stop`
 
 **Parameters:**
-• message: Text to spam continuously
-• delay: Seconds between messages (min {MIN_DELAY})""",
+- message: Text to spam continuously
+- delay: Seconds between messages (min {MIN_DELAY})"""
+        ),
+        
+        "stop": (
+            f"""**{prefix}stop** - Stop active commands
 
-        "stop": f"""**{prefix}stop** - Stop active commands
+**Usage:** `{prefix}stop`""",
+            f"""Stops any running send/spm commands and disables auto-restart for this bot."""
+        ),
+        
+        "restart": (
+            f"""**{prefix}restart** - Restart last command
 
-**Usage:** `{prefix}stop`
-
-Stops any running send/spm commands and disables auto-restart for this bot.""",
-
-        "restart": f"""**{prefix}restart** - Restart last command
-
-**Usage:** `{prefix}restart`
-
-Manually restarts the last command that was running on this bot.""",
-
-        "listento": f"""**{prefix}listento** - Monitor keywords in channel
+**Usage:** `{prefix}restart`""",
+            f"""Manually restarts the last command that was running on this bot."""
+        ),
+        
+        "listento": (
+            f"""**{prefix}listento** - Monitor keywords in channel
 
 **Usage:** `{prefix}listento [case] [word] "keywords" [channel]`
-**Example:** `{prefix}listento y n "hello,test" https://discord.com/channels/123/456`
-
-**Parameters:**
-• case: y/n for case-sensitive matching
-• word: y/n for whole word matching only
-• keywords: Comma-separated list in quotes
-• channel: Discord channel URL or ID""",
-
-        "stoplisten": f"""**{prefix}stoplisten** - Stop monitoring channel
+**Example:** `{prefix}listento y n "hello,test" https://discord.com/channels/123/456`""",
+            f"""**Parameters:**
+- case: y/n for case-sensitive matching
+- word: y/n for whole word matching only
+- keywords: Comma-separated list in quotes
+- channel: Discord channel URL or ID"""
+        ),
+        
+        "stoplisten": (
+            f"""**{prefix}stoplisten** - Stop monitoring channel
 
 **Usage:** `{prefix}stoplisten [channel]`
-**Example:** `{prefix}stoplisten https://discord.com/channels/123/456`
-
-Stops keyword monitoring for the specified channel.""",
-
-        "editlisten": f"""**{prefix}editlisten** - Edit keyword settings
+**Example:** `{prefix}stoplisten https://discord.com/channels/123/456`""",
+            f"""Stops keyword monitoring for the specified channel."""
+        ),
+        
+        "editlisten": (
+            f"""**{prefix}editlisten** - Edit keyword settings
 
 **Usage:** `{prefix}editlisten [case] [word] "keywords" [channel]`
-**Example:** `{prefix}editlisten n y "new,words" https://discord.com/channels/123/456`
-
-Updates keyword list and matching settings for existing listener.""",
-
-        "react": f"""**>react** - Multi-bot reactions
+**Example:** `{prefix}editlisten n y "new,words" https://discord.com/channels/123/456`""",
+            f"""Updates keyword list and matching settings for existing listener."""
+        ),
+        
+        "react": (
+            f"""**>react** - Multi-bot reactions
 
 **Usage:** `>react [emojis] [count] [message] [delay]`
-**Example:** `>react 😀,😎,🔥 5 https://discord.com/channels/123/456/789 0.5`
+**Example:** `>react 😀,😎,🔥 5 https://discord.com/channels/123/456/789 0.5`""",
+            f"""**Parameters:**
+- emojis: Comma-separated emoji list
+- count: Number of reactions (1-100)
+- message: Discord message URL or ID
+- delay: Seconds between reactions (optional, default: 1)"""
+        ),
+        
+        "stopall": (
+            f"""**>stopall** - Emergency stop
 
-**Parameters:**
-• emojis: Comma-separated emoji list
-• count: Number of reactions (1-100)
-• message: Discord message URL or ID
-• delay: Seconds between reactions (optional, default: 1)""",
+**Usage:** `>stopall`""",
+            f"""Immediately stops ALL bots and commands across the entire system."""
+        ),
+        
+        "showallbots": (
+            f"""**>showallbots** - List active bots
 
-        "stopall": f"""**>stopall** - Emergency stop
-
-**Usage:** `>stopall`
-
-Immediately stops ALL bots and commands across the entire system.""",
-
-        "showallbots": f"""**>showallbots** - List active bots
-
-**Usage:** `>showallbots`
-
-Shows all currently running bots with their prefixes and types.""",
-
-        "addbot": f"""**>addbot** - Add dynamic bot
+**Usage:** `>showallbots`""",
+            f"""Shows all currently running bots with their prefixes and types."""
+        ),
+        
+        "addbot": (
+            f"""**>addbot** - Add dynamic bot
 
 **Usage:** `>addbot [prefix] [token]`
-**Example:** `>addbot & your_bot_token_here`
-
-Adds and starts a new bot with the specified prefix.""",
-
-        "removebot": f"""**>removebot** - Remove dynamic bot
+**Example:** `>addbot & your_bot_token_here`""",
+            f"""Adds and starts a new bot with the specified prefix."""
+        ),
+        
+        "removebot": (
+            f"""**>removebot** - Remove dynamic bot
 
 **Usage:** `>removebot [prefix]`
-**Example:** `>removebot &`
-
-Stops and removes a dynamic bot permanently.""",
-
-        "changeprefix": f"""**>changeprefix** - Change bot prefix
+**Example:** `>removebot &`""",
+            f"""Stops and removes a dynamic bot permanently."""
+        ),
+        
+        "changeprefix": (
+            f"""**>changeprefix** - Change bot prefix
 
 **Usage:** `>changeprefix [old] [new]`
-**Example:** `>changeprefix & %`
-
-Changes prefix for dynamic bots (hardcoded bots need manual config).""",
-
-        "adduser": f"""**>adduser** - Authorize user for bot
+**Example:** `>changeprefix & %`""",
+            f"""Changes prefix for dynamic bots (hardcoded bots need manual config)."""
+        ),
+        
+        "adduser": (
+            f"""**>adduser** - Authorize user for bot
 
 **Usage:** `>adduser [user_ID] [prefix]`
-**Example:** `>adduser 123456789012345678 &`
-
-Grants user permission to use commands for specific bot.""",
-
-        "removeuser": f"""**>removeuser** - Remove user authorization
+**Example:** `>adduser 123456789012345678 &`""",
+            f"""Grants user permission to use commands for specific bot."""
+        ),
+        
+        "removeuser": (
+            f"""**>removeuser** - Remove user authorization
 
 **Usage:** `>removeuser [user_ID] [prefix]`
-**Example:** `>removeuser 123456789012345678 &`
-
-Revokes user permission for specific bot."""
+**Example:** `>removeuser 123456789012345678 &`""",
+            f"""Revokes user permission for specific bot."""
+        )
     }
     
-    return commands_help.get(cmd)
+    return commands_help.get(cmd, (f"Command `{cmd}` not found", ""))
 
     @bot.event
     async def on_command_error(ctx, error):
@@ -1984,24 +2002,13 @@ async def run_multiple_bots():
         # Use hardcoded token first, fallback to environment variable
         token = HARDCODED_TOKENS.get(token_name) or os.getenv(token_name)
         if token and token != f"YOUR_{token_name.split('TOKEN')[0]}DISCORD_TOKEN_HERE":
-            try:
-                bot = create_bot(prefix, f"Bot-{prefix}")
-                
-                # Check if bot was created successfully
-                if bot is None:
-                    print(f"❌ Failed to create bot with prefix '{prefix}' - bot creation returned None")
-                    continue
-                
-                bots[prefix] = bot  # Store by prefix for easier access
+            bot = create_bot(prefix, f"Bot-{prefix}")
+            bots[prefix] = bot  # Store by prefix for easier access
 
-                # Create a task for this bot
-                task = asyncio.create_task(bot.start(token))
-                bot_tasks.append(task)
-                print(f"🚀 Starting hardcoded bot with prefix '{prefix}' using {token_name}")
-                
-            except Exception as e:
-                print(f"❌ Failed to create/start hardcoded bot '{prefix}': {e}")
-                continue
+            # Create a task for this bot
+            task = asyncio.create_task(bot.start(token))
+            bot_tasks.append(task)
+            print(f"🚀 Starting hardcoded bot with prefix '{prefix}' using {token_name}")
         else:
             print(
                 f"⚠️ {token_name} not found or using placeholder, skipping bot with prefix '{prefix}'"
@@ -2012,22 +2019,14 @@ async def run_multiple_bots():
         token = bot_data['token']
         try:
             bot = create_bot(prefix, f"DynamicBot-{prefix}")
-            
-            # Check if bot was created successfully
-            if bot is None:
-                print(f"❌ Failed to create dynamic bot with prefix '{prefix}' - bot creation returned None")
-                continue
-                
             bots[prefix] = bot
 
             # Create a task for this bot
             task = asyncio.create_task(bot.start(token))
             bot_tasks.append(task)
             print(f"🚀 Starting dynamic bot with prefix '{prefix}'")
-            
         except Exception as e:
             print(f"❌ Failed to start dynamic bot '{prefix}': {e}")
-            continue
 
     if not bot_tasks:
         print(
@@ -2036,13 +2035,13 @@ async def run_multiple_bots():
         return
 
     print(f"📊 Loaded {len(listening_configs)} keyword listeners from previous session")
-    print(f"✅ Successfully started {len(bot_tasks)} bot(s)")
 
     # Wait for all bots to finish (they should run indefinitely)
     try:
         await asyncio.gather(*bot_tasks, return_exceptions=True)
     except Exception as e:
         print(f"❌ Error running bots: {e}")
+
 
 if __name__ == "__main__":
     # Start the Flask keep-alive server
@@ -2103,4 +2102,3 @@ if __name__ == "__main__":
         print("\n🛑 Shutting down all bots...")
     except Exception as e:
         print(f"❌ Failed to start bots: {e}")
-
