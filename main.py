@@ -815,7 +815,7 @@ Bot is running 24/7 on Render with keep-alive monitoring"""
                 parts = content.split(" ", 2)
                 if len(parts) != 3:
                     try:
-                        await message.author.send("Usage: `>adduser [user_ID] [prefix]`")addbot [prefix] [token]`")
+                        await message.author.send("Usage: `>addbot [prefix] [token]`")
                     except:
                         pass
                     return
@@ -928,4 +928,426 @@ Bot is running 24/7 on Render with keep-alive monitoring"""
                 parts = content.split(" ", 2)
                 if len(parts) != 3:
                     try:
-                        await message.author.send("Usage: `>
+                        await message.author.send("Usage: `>adduser [user_ID] [prefix]`")
+                    except:
+                        pass
+                    return
+                
+                try:
+                    target_user_id = int(parts[1])
+                    target_prefix = parts[2]
+                except ValueError:
+                    try:
+                        await message.author.send("❌ Invalid user ID. Must be a number.")
+                    except:
+                        pass
+                    return
+                
+                # Check if bot exists
+                if target_prefix not in dynamic_bots:
+                    try:
+                        await message.author.send(f"❌ No dynamic bot found with prefix '{target_prefix}'")
+                    except:
+                        pass
+                    return
+                
+                # Check if user is already authorized
+                if target_user_id in dynamic_bots[target_prefix]['authorized_users']:
+                    try:
+                        await message.author.send(f"⚠️ User {target_user_id} is already authorized for bot '{target_prefix}'")
+                    except:
+                        pass
+                    return
+                
+                # Add user to authorized list
+                dynamic_bots[target_prefix]['authorized_users'].append(target_user_id)
+                await save_dynamic_bots()
+                
+                try:
+                    await message.author.send(f"✅ User {target_user_id} added to authorized users for bot '{target_prefix}'")
+                except:
+                    pass
+                return
+
+            # Remove user command
+            elif content.startswith(">removeuser"):
+                parts = content.split(" ", 2)
+                if len(parts) != 3:
+                    try:
+                        await message.author.send("Usage: `>removeuser [user_ID] [prefix]`")
+                    except:
+                        pass
+                    return
+                
+                try:
+                    target_user_id = int(parts[1])
+                    target_prefix = parts[2]
+                except ValueError:
+                    try:
+                        await message.author.send("❌ Invalid user ID. Must be a number.")
+                    except:
+                        pass
+                    return
+                
+                # Check if bot exists
+                if target_prefix not in dynamic_bots:
+                    try:
+                        await message.author.send(f"❌ No dynamic bot found with prefix '{target_prefix}'")
+                    except:
+                        pass
+                    return
+                
+                # Check if user is in authorized list
+                if target_user_id not in dynamic_bots[target_prefix]['authorized_users']:
+                    try:
+                        await message.author.send(f"⚠️ User {target_user_id} is not in authorized users for bot '{target_prefix}'")
+                    except:
+                        pass
+                    return
+                
+                # Remove user from authorized list
+                dynamic_bots[target_prefix]['authorized_users'].remove(target_user_id)
+                await save_dynamic_bots()
+                
+                try:
+                    await message.author.send(f"✅ User {target_user_id} removed from authorized users for bot '{target_prefix}'")
+                except:
+                    pass
+                return
+
+        # Check for account generation command
+        if content.startswith(">generate account") and user_id in ALLOWED_USERS:
+            await handle_account_generation(message)
+            return
+
+        # Debug: Show when processing commands
+        if any(content.startswith(prefix) for prefix in [prefix for prefix in BOT_CONFIGS.values()] + list(dynamic_bots.keys()) + ['>']):
+            if check_user_authorization(user_id, content[0] if content else None):
+                print(f"🔍 Processing command: '{content}' from user {user_id}")
+        
+        # Process normal commands
+        await bot.process_commands(message)
+
+    @bot.event
+    async def on_command_error(ctx, error):
+        """Handle command errors gracefully"""
+        if isinstance(error, commands.CheckFailure):
+            # Silently ignore authorization failures - no response to unauthorized users
+            return
+        elif isinstance(error, commands.CommandNotFound):
+            # Only respond to command not found if user is authorized
+            if check_user_authorization(ctx.author.id, prefix):
+                try:
+                    await ctx.author.send(
+                        f"⚠️ Unknown command. Use `{prefix}help_bot` for available commands."
+                    )
+                except:
+                    pass
+        elif isinstance(error, commands.MissingRequiredArgument):
+            # Only respond to missing arguments if user is authorized
+            if check_user_authorization(ctx.author.id, prefix):
+                try:
+                    await ctx.author.send(
+                        f"⚠️ Missing required arguments. Use `{prefix}help_bot` for command usage."
+                    )
+                except:
+                    pass
+        elif isinstance(error, commands.BadArgument):
+            # Only respond to bad arguments if user is authorized
+            if check_user_authorization(ctx.author.id, prefix):
+                try:
+                    await ctx.author.send(
+                        f"⚠️ Invalid argument type. Use `{prefix}help_bot` for command usage."
+                    )
+                except:
+                    pass
+        else:
+            # Only respond to general errors if user is authorized
+            if check_user_authorization(ctx.author.id, prefix):
+                try:
+                    await ctx.author.send(f"⚠️ An error occurred: {error}")
+                except:
+                    pass
+            print(f"Unhandled error in {bot_name}: {error}")
+
+    return bot
+
+
+async def handle_account_generation(message):
+    """Handle account generation commands"""
+    global generated_accounts, generation_tasks
+
+    parts = message.content.split()
+    if len(parts) < 3:
+        try:
+            await message.author.send(
+                "⚠️ Usage: `>generate account [prefix]`\nExample: `>generate account &`"
+            )
+        except:
+            pass
+        return
+
+    prefix = parts[2]
+    user_id = message.author.id
+
+    # Check if prefix is already in use
+    existing_owner = get_prefix_owner(prefix)
+    if existing_owner:
+        try:
+            await message.author.send(f"⚠️ Prefix '{prefix}' is already in use by: {existing_owner}")
+        except:
+            pass
+        return
+
+    # Check if generation is already in progress for this user
+    if user_id in generation_tasks:
+        try:
+            await message.author.send(
+                "⚠️ Account generation already in progress. Please wait...")
+        except:
+            pass
+        return
+
+    try:
+        await message.author.send(
+            f"🔄 Starting account generation for prefix '{prefix}'...\nThis may take 5-10 minutes. You'll be notified when complete."
+        )
+    except:
+        pass
+
+    # Start generation task
+    task = asyncio.create_task(generate_and_deploy_account(prefix, user_id))
+    generation_tasks[user_id] = task
+
+
+async def generate_and_deploy_account(prefix, user_id):
+    """Generate account and deploy new bot"""
+    global generated_accounts, generation_tasks, BOT_CONFIGS, bots
+
+    try:
+        # Generate account
+        result = await account_generator.generate_account(use_temp_email=True,
+                                                          use_sms=True)
+
+        if result['success']:
+            token = result['token']
+            username = result['username']
+
+            # Store account data
+            generated_accounts[prefix] = result
+
+            # Add to bot configs
+            token_env_name = f"TOKEN_{prefix.upper()}"
+            BOT_CONFIGS[token_env_name] = prefix
+
+            # Set environment variable (temporary for this session)
+            os.environ[token_env_name] = token
+
+            # Create and start new bot
+            bot_name = f"Bot-{prefix}"
+            bot = create_bot(prefix, bot_name)
+            bots[prefix] = bot
+
+            # Start bot
+            asyncio.create_task(bot.start(token))
+
+            # Save to file for persistence
+            await save_generated_accounts()
+
+            # Notify user
+            try:
+                user = None
+                for bot in bots.values():
+                    try:
+                        user = await bot.fetch_user(user_id)
+                        break
+                    except:
+                        continue
+
+                if user:
+                    await user.send(
+                        f"✅ Account generated successfully!\n"
+                        f"**Prefix:** {prefix}\n"
+                        f"**Username:** {username}\n"
+                        f"**Bot Status:** Online and ready\n"
+                        f"You can now use `{prefix}send`, `{prefix}spm`, etc.")
+            except:
+                pass
+        else:
+            # Notify failure
+            try:
+                user = None
+                for bot in bots.values():
+                    try:
+                        user = await bot.fetch_user(user_id)
+                        break
+                    except:
+                        continue
+
+                if user:
+                    await user.send(
+                        f"❌ Account generation failed: {result.get('error', 'Unknown error')}"
+                    )
+            except:
+                pass
+
+    except Exception as e:
+        try:
+            user = None
+            for bot in bots.values():
+                try:
+                    user = await bot.fetch_user(user_id)
+                    break
+                except:
+                    continue
+
+            if user:
+                await user.send(f"❌ Account generation error: {str(e)}")
+        except:
+            pass
+
+    finally:
+        # Clean up task
+        generation_tasks.pop(user_id, None)
+
+
+async def save_generated_accounts():
+    """Save generated accounts to file"""
+    try:
+        async with aiofiles.open('generated_accounts.json', 'w') as f:
+            await f.write(json.dumps(generated_accounts, indent=2))
+    except Exception as e:
+        print(f"Failed to save accounts: {e}")
+
+
+async def load_generated_accounts():
+    """Load generated accounts from file"""
+    global generated_accounts
+    try:
+        async with aiofiles.open('generated_accounts.json', 'r') as f:
+            content = await f.read()
+            generated_accounts = json.loads(content)
+
+            # Restore BOT_CONFIGS
+            for prefix, account_data in generated_accounts.items():
+                token_env_name = f"TOKEN_{prefix.upper()}"
+                BOT_CONFIGS[token_env_name] = prefix
+                # Note: Tokens would need to be restored from secure storage
+
+    except FileNotFoundError:
+        generated_accounts = {}
+    except Exception as e:
+        print(f"Failed to load accounts: {e}")
+        generated_accounts = {}
+
+
+async def run_multiple_bots():
+    """Run multiple bot instances simultaneously"""
+    # Load existing generated accounts and dynamic bots
+    await load_generated_accounts()
+    await load_dynamic_bots()
+
+    bot_tasks = []
+
+    # Hardcoded tokens for local development
+    HARDCODED_TOKENS = {
+        "TOKEN": "",
+        "TOKEN2": "",
+        "TOKEN3": ""
+    }
+
+    # Start hardcoded bots
+    for token_name, prefix in BOT_CONFIGS.items():
+        # Use hardcoded token first, fallback to environment variable
+        token = HARDCODED_TOKENS.get(token_name) or os.getenv(token_name)
+        if token and token != f"YOUR_{token_name.split('TOKEN')[0]}DISCORD_TOKEN_HERE":
+            bot = create_bot(prefix, f"Bot-{prefix}")
+            bots[prefix] = bot  # Store by prefix for easier access
+
+            # Create a task for this bot
+            task = asyncio.create_task(bot.start(token))
+            bot_tasks.append(task)
+            print(f"🚀 Starting hardcoded bot with prefix '{prefix}' using {token_name}")
+        else:
+            print(
+                f"⚠️ {token_name} not found or using placeholder, skipping bot with prefix '{prefix}'"
+            )
+
+    # Start dynamic bots
+    for prefix, bot_data in dynamic_bots.items():
+        token = bot_data['token']
+        try:
+            bot = create_bot(prefix, f"DynamicBot-{prefix}")
+            bots[prefix] = bot
+
+            # Create a task for this bot
+            task = asyncio.create_task(bot.start(token))
+            bot_tasks.append(task)
+            print(f"🚀 Starting dynamic bot with prefix '{prefix}'")
+        except Exception as e:
+            print(f"❌ Failed to start dynamic bot '{prefix}': {e}")
+
+    if not bot_tasks:
+        print(
+            "❌ No valid tokens found. Please add at least TOKEN to your secrets or use >addbot command."
+        )
+        return
+
+    # Wait for all bots to finish (they should run indefinitely)
+    try:
+        await asyncio.gather(*bot_tasks, return_exceptions=True)
+    except Exception as e:
+        print(f"❌ Error running bots: {e}")
+
+
+if __name__ == "__main__":
+    # Start the Flask keep-alive server
+    keep_alive()
+
+    print("🤖 Discord Multi-Bot System with Dynamic Bot Management Starting...")
+    print("=" * 70)
+
+    # Check API keys for account generation
+    # Hardcoded API keys for local development (optional)
+    HARDCODED_API_KEYS = {
+        "SMS_ACTIVATE_API_KEY": "",  # Add your SMS-Activate API key here
+        "CAPTCHA_API_KEY": ""  # Add your CAPTCHA API key here  
+    }
+
+    sms_key = HARDCODED_API_KEYS.get("SMS_ACTIVATE_API_KEY") or os.getenv(
+        'SMS_ACTIVATE_API_KEY')
+    captcha_key = HARDCODED_API_KEYS.get("CAPTCHA_API_KEY") or os.getenv(
+        'CAPTCHA_API_KEY')
+
+    print("Account Generation Services:")
+    print(
+        f"  SMS Service: {'✅ Ready' if sms_key else '❌ Missing SMS_ACTIVATE_API_KEY'}"
+    )
+    print(
+        f"  CAPTCHA Service: {'✅ Ready' if captcha_key else '❌ Missing CAPTCHA_API_KEY'}"
+    )
+    print()
+
+    print("Configured hardcoded bots:")
+    for token_name, prefix in BOT_CONFIGS.items():
+        token = os.getenv(token_name)
+        status = "✅ Ready" if token else "❌ Missing"
+        print(f"  {prefix} prefix - {token_name}: {status}")
+    print()
+    
+    print("System Commands:")
+    print("  >addbot [prefix] [token] - Add new Discord bot dynamically")
+    print("  >removebot [prefix] - Remove dynamic bot")
+    print("  >adduser [user_ID] [prefix] - Add authorized user for specific bot")
+    print("  >removeuser [user_ID] [prefix] - Remove authorized user from specific bot")
+    print("  >showallbots - Show all active bots")
+    print("  >generate account [prefix] - Generate new Discord account and bot")
+    print("  >stopall - Emergency stop all bots")
+    print("=" * 70)
+
+    try:
+        asyncio.run(run_multiple_bots())
+    except KeyboardInterrupt:
+        print("\n🛑 Shutting down all bots...")
+    except Exception as e:
+        print(f"❌ Failed to start bots: {e}")
