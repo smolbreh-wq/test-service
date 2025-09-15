@@ -1537,236 +1537,77 @@ def create_bot(prefix: str, bot_name: str):
             pass
 
     @bot.command()
-    async def help_bot(ctx, category: str = None, command: str = None):
+    async def help_bot(ctx):
         """Display help information about bot commands"""
-        
-        # If specific command help is requested
-        if command:
-            part1, part2 = get_command_help(command, prefix)
-            if part1 and "not found" not in part1:
-                await ctx.send(part1)
-                if part2:
-                    await asyncio.sleep(1)
-                    await ctx.send(part2)
-            else:
-                await ctx.send(f"❌ Command `{command}` not found")
-            return
-        
-        # If category help is requested
-        if category:
-            category_help = get_category_help(category, prefix)
-            if category_help:
-                await ctx.send(category_help)
-            else:
-                await ctx.send(f"❌ Category `{category}` not found\nAvailable: basic, listening, system, management")
-            return
-        
-        # Main help menu
-        help_message = f"""**Bot Help Menu** (Prefix: {prefix})
+        help_message = f"""🤖 **Discord Bot Help** (Prefix: {prefix})
+Available commands for authorized users:
 
-**Categories:**
-`{prefix}help_bot basic` - Message sending & spam commands
-`{prefix}help_bot listening` - Keyword monitoring commands  
-`{prefix}help_bot system` - System-wide commands (>)
-`{prefix}help_bot management` - Bot management commands (>)
+**Basic Commands:**
+**`{prefix}send [message] [delay] [amount]`**
+Send a message multiple times with delay
+• message: Text to send (use quotes for spaces)
+• delay: Seconds between messages (min {MIN_DELAY})
+• amount: Number of repetitions (max {MAX_AMOUNT})
+Example: `{prefix}send "Hello World" 1.0 3`
 
-**Quick Help:**
-`{prefix}help_bot [command]` - Show specific command usage
-Example: `{prefix}help_bot send`
+**`{prefix}spm start [message] [delay]`**
+Start continuous spam (infinite messages until stopped)
+Example: `{prefix}spm start "Spam message" 0.5`
 
-**Emergency:** `>stopall` - Stop everything immediately"""
+**`{prefix}spm stop`** / **`{prefix}stop`**
+Stop any active message sending or spam
+
+**`{prefix}restart`**
+Manually restart the last command that was running
+
+**Keyword Listening Commands:**
+**`{prefix}listento [case_sensitive] [word_match] "keywords" [channel_link]`**
+Start listening for keywords in a channel
+• case_sensitive: y/n for case sensitivity
+• word_match: y/n for whole word matching
+• keywords: Comma-separated list in quotes
+• channel_link: Discord channel URL or channel ID
+Example: `{prefix}listento y n "hello,test" https://discord.com/channels/123/456`
+
+**`{prefix}stoplisten [channel_link]`**
+Stop listening in a specific channel
+
+**`{prefix}editlisten [case_sensitive] [word_match] "keywords" [channel_link]`**
+Edit existing keyword listener settings
+
+**System Commands** (Available to all authorized users):
+**`>react [emojis] [num_reactions] [message_link] [delay]`**
+Add reactions using multiple bots
+• emojis: Comma-separated emoji list
+• num_reactions: Number of reactions to add
+• message_link: Discord message URL or message ID  
+• delay: Optional delay between reactions (default: 1s)
+Example: `>react 😀,😎,🔥 5 https://discord.com/channels/123/456/789 0.5`
+
+**`>stopall`**
+🚨 EMERGENCY STOP - Immediately stops ALL bots and commands
+
+**`>showallbots`**
+Show all active bots and their prefixes
+
+**Bot Management Commands:**
+**`>addbot [prefix] [token]`** - Add new bot dynamically
+**`>removebot [prefix]`** - Remove dynamic bot
+**`>changeprefix [old_prefix] [new_prefix]`** - Change dynamic bot prefix
+**`>adduser [user_ID] [prefix]`** - Add authorized user for specific bot
+**`>removeuser [user_ID] [prefix]`** - Remove authorized user
+
+**Features:**
+• Auto-restart after errors (max {MAX_RESTART_ATTEMPTS} attempts)
+• Multi-bot reaction distribution
+• Real-time keyword monitoring with DMs
+• Support for forum channels
+• Individual user authorization per bot
+• Emergency stop functionality
+
+Bot runs 24/7 with keep-alive monitoring."""
 
         await ctx.send(help_message)
-
-
-def get_category_help(category: str, prefix: str) -> str:
-    """Get help for a specific category"""
-    
-    if category.lower() == "basic":
-        return f"""**Basic Commands** (Prefix: {prefix})
-
-`{prefix}send` - Send message multiple times
-`{prefix}spm` - Start/stop continuous spam
-`{prefix}stop` - Stop any active sending
-`{prefix}restart` - Restart last command
-
-Use `{prefix}help_bot [command]` for detailed usage"""
-
-    elif category.lower() == "listening":
-        return f"""**Keyword Listening** (Prefix: {prefix})
-
-`{prefix}listento` - Start monitoring keywords
-`{prefix}stoplisten` - Stop monitoring channel
-`{prefix}editlisten` - Edit keyword settings
-
-Use `{prefix}help_bot [command]` for detailed usage"""
-
-    elif category.lower() == "system":
-        return f"""**System Commands** (Prefix: >)
-
-`>react` - Multi-bot reactions
-`>stopall` - Emergency stop everything
-`>showallbots` - List all active bots
-`>generate` - Generate new bot account
-
-Use `{prefix}help_bot [command]` for detailed usage"""
-
-    elif category.lower() == "management":
-        return f"""**Bot Management** (Prefix: >)
-
-`>addbot` - Add new dynamic bot
-`>removebot` - Remove dynamic bot
-`>changeprefix` - Change bot prefix
-`>adduser` - Add authorized user
-`>removeuser` - Remove authorized user
-
-Use `{prefix}help_bot [command]` for detailed usage"""
-
-    return None
-
-
-def get_command_help(command: str, prefix: str) -> tuple:
-    """Get detailed help for a specific command - returns (part1, part2)"""
-    
-    cmd = command.lower().replace(prefix, "").replace(">", "")
-    
-    commands_help = {
-        "send": (
-            f"""**{prefix}send** - Send message multiple times
-
-**Usage:** `{prefix}send [message] [delay] [amount]`
-**Example:** `{prefix}send "Hello World" 1.0 5`""",
-            f"""**Parameters:**
-- message: Text to send (use quotes for spaces)
-- delay: Seconds between messages (min {MIN_DELAY})
-- amount: Number of repetitions (1-{MAX_AMOUNT})"""
-        ),
-        
-        "spm": (
-            f"""**{prefix}spm** - Continuous spam control
-
-**Usage:** 
-`{prefix}spm start [message] [delay]`
-`{prefix}spm stop`""",
-            f"""**Examples:**
-`{prefix}spm start "Spam text" 0.5`
-`{prefix}spm stop`
-
-**Parameters:**
-- message: Text to spam continuously
-- delay: Seconds between messages (min {MIN_DELAY})"""
-        ),
-        
-        "stop": (
-            f"""**{prefix}stop** - Stop active commands
-
-**Usage:** `{prefix}stop`""",
-            f"""Stops any running send/spm commands and disables auto-restart for this bot."""
-        ),
-        
-        "restart": (
-            f"""**{prefix}restart** - Restart last command
-
-**Usage:** `{prefix}restart`""",
-            f"""Manually restarts the last command that was running on this bot."""
-        ),
-        
-        "listento": (
-            f"""**{prefix}listento** - Monitor keywords in channel
-
-**Usage:** `{prefix}listento [case] [word] "keywords" [channel]`
-**Example:** `{prefix}listento y n "hello,test" https://discord.com/channels/123/456`""",
-            f"""**Parameters:**
-- case: y/n for case-sensitive matching
-- word: y/n for whole word matching only
-- keywords: Comma-separated list in quotes
-- channel: Discord channel URL or ID"""
-        ),
-        
-        "stoplisten": (
-            f"""**{prefix}stoplisten** - Stop monitoring channel
-
-**Usage:** `{prefix}stoplisten [channel]`
-**Example:** `{prefix}stoplisten https://discord.com/channels/123/456`""",
-            f"""Stops keyword monitoring for the specified channel."""
-        ),
-        
-        "editlisten": (
-            f"""**{prefix}editlisten** - Edit keyword settings
-
-**Usage:** `{prefix}editlisten [case] [word] "keywords" [channel]`
-**Example:** `{prefix}editlisten n y "new,words" https://discord.com/channels/123/456`""",
-            f"""Updates keyword list and matching settings for existing listener."""
-        ),
-        
-        "react": (
-            f"""**>react** - Multi-bot reactions
-
-**Usage:** `>react [emojis] [count] [message] [delay]`
-**Example:** `>react 😀,😎,🔥 5 https://discord.com/channels/123/456/789 0.5`""",
-            f"""**Parameters:**
-- emojis: Comma-separated emoji list
-- count: Number of reactions (1-100)
-- message: Discord message URL or ID
-- delay: Seconds between reactions (optional, default: 1)"""
-        ),
-        
-        "stopall": (
-            f"""**>stopall** - Emergency stop
-
-**Usage:** `>stopall`""",
-            f"""Immediately stops ALL bots and commands across the entire system."""
-        ),
-        
-        "showallbots": (
-            f"""**>showallbots** - List active bots
-
-**Usage:** `>showallbots`""",
-            f"""Shows all currently running bots with their prefixes and types."""
-        ),
-        
-        "addbot": (
-            f"""**>addbot** - Add dynamic bot
-
-**Usage:** `>addbot [prefix] [token]`
-**Example:** `>addbot & your_bot_token_here`""",
-            f"""Adds and starts a new bot with the specified prefix."""
-        ),
-        
-        "removebot": (
-            f"""**>removebot** - Remove dynamic bot
-
-**Usage:** `>removebot [prefix]`
-**Example:** `>removebot &`""",
-            f"""Stops and removes a dynamic bot permanently."""
-        ),
-        
-        "changeprefix": (
-            f"""**>changeprefix** - Change bot prefix
-
-**Usage:** `>changeprefix [old] [new]`
-**Example:** `>changeprefix & %`""",
-            f"""Changes prefix for dynamic bots (hardcoded bots need manual config)."""
-        ),
-        
-        "adduser": (
-            f"""**>adduser** - Authorize user for bot
-
-**Usage:** `>adduser [user_ID] [prefix]`
-**Example:** `>adduser 123456789012345678 &`""",
-            f"""Grants user permission to use commands for specific bot."""
-        ),
-        
-        "removeuser": (
-            f"""**>removeuser** - Remove user authorization
-
-**Usage:** `>removeuser [user_ID] [prefix]`
-**Example:** `>removeuser 123456789012345678 &`""",
-            f"""Revokes user permission for specific bot."""
-        )
-    }
-    
-    return commands_help.get(cmd, (f"Command `{cmd}` not found", ""))
 
     @bot.event
     async def on_command_error(ctx, error):
