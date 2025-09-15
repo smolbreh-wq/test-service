@@ -815,7 +815,7 @@ Bot is running 24/7 on Render with keep-alive monitoring"""
                 parts = content.split(" ", 2)
                 if len(parts) != 3:
                     try:
-                        await message.author.send("Usage: `>addbot [prefix] [token]`")
+                        await message.author.send("Usage: `>adduser [user_ID] [prefix]`")addbot [prefix] [token]`")
                     except:
                         pass
                     return
