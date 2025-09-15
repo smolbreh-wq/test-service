@@ -512,8 +512,14 @@ async def setup_keyword_listener(bot, channel_id: int, config: dict):
 
 async def handle_keyword_message(message, bot_prefix):
     """Handle incoming message for keyword matching - SELF-BOT VERSION"""
-    # Skip own messages
-    if message.author == message.guild.me if message.guild else False:
+    # Skip own messages - for self-bots, check against the specific bot
+    current_bot = None
+    for bot in bots.values():
+        if bot.command_prefix == bot_prefix:
+            current_bot = bot
+            break
+    
+    if current_bot and message.author == current_bot.user:
         return
     
     # Check all listening configs for this bot
@@ -611,33 +617,6 @@ async def setup_keyword_listener(bot, channel_id: int, config: dict):
         return False, f"Error setting up listener: {str(e)}"
 
 
-# SELF-BOT VERSION: Updated on_message event handler
-async def on_message(message):
-    """Handle system commands, keyword monitoring, and regular commands - SELF-BOT VERSION"""
-    global emergency_stop
-
-    # Handle keyword listening for ALL messages (except our own)
-    await handle_keyword_message(message, prefix)
-
-    # Skip processing commands from other bots (but not from self)
-    if message.author.bot and message.author != bot.user:
-        return
-
-    user_id = message.author.id
-    content = message.content
-
-    # System commands (prefix: >)
-    if content.startswith(">") and user_id in ALLOWED_USERS:
-        # ... system commands remain the same ...
-        pass
-    
-    # Process normal commands
-    await bot.process_commands(message)
-
-
-# SELF-BOT VERSION: Enhanced listento command with better error handling
-@bot.command()
-async def listento(ctx, case_sensitive: str, word_match: str, keywords: str, channel_link: str):
     """
     Start listening for keywords in a channel - SELF-BOT VERSION
     
