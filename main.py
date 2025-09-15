@@ -1,5 +1,5 @@
 # System commands (prefix: >)
-        if content.startswith(">") and user_id in ALLOWED_USERS:
+       if content.startswith(">") and user_id in ALLOWED_USERS:
             # Handle system commands here directly instead of separate function
             await handle_system_commands_inline(message)
             return
@@ -1544,3 +1544,4 @@ def create_bot(prefix: str, bot_name: str):
         
         Usage: {prefix}editlisten [y/n] [y/n] "keyword1, keyword2, etc.." [channel_link]
         """
+
