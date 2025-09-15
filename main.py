@@ -511,9 +511,9 @@ async def setup_keyword_listener(bot, channel_id: int, config: dict):
 
 
 async def handle_keyword_message(message, bot_prefix):
-    """Handle incoming message for keyword matching"""
-    # Skip bot messages
-    if message.author.bot:
+    """Handle incoming message for keyword matching - SELF-BOT VERSION"""
+    # Skip own messages
+    if message.author == message.guild.me if message.guild else False:
         return
     
     # Check all listening configs for this bot
@@ -540,28 +540,183 @@ async def handle_keyword_message(message, bot_prefix):
             
             # Send DM to the user who set up the listener
             try:
-                user = await message.guild.members[0]._state.http.get_user(user_id) if message.guild else None
+                # SELF-BOT FIX: Get the current bot instance
+                current_bot = None
+                for bot in bots.values():
+                    if bot.command_prefix == bot_prefix:
+                        current_bot = bot
+                        break
+                
+                if not current_bot:
+                    print(f"❌ Could not find bot with prefix {bot_prefix}")
+                    continue
+                
+                # SELF-BOT FIX: For self-bots, fetch user directly
+                user = current_bot.get_user(user_id)
                 if not user:
-                    # Try to get user from any bot
-                    for bot in bots.values():
-                        try:
-                            user = await bot.fetch_user(user_id)
-                            break
-                        except:
-                            continue
+                    user = await current_bot.fetch_user(user_id)
                 
                 if user:
+                    # Truncate long messages to prevent Discord limits
+                    message_content = message.content
+                    if len(message_content) > 1500:
+                        message_content = message_content[:1500] + "... (truncated)"
+                    
                     dm_content = f"🔍 **Keyword Alert**\n"
                     dm_content += f"**Matched Keyword:** {matched_keyword}\n"
-                    dm_content += f"**Author:** {message.author.mention} ({message.author})\n"
+                    dm_content += f"**Author:** {message.author.name} ({message.author.id})\n"
                     dm_content += f"**Channel:** #{message.channel.name}\n"
-                    dm_content += f"**Message:** {message.content}\n"
+                    if message.guild:
+                        dm_content += f"**Server:** {message.guild.name}\n"
+                    dm_content += f"**Message:** {message_content}\n"
                     dm_content += f"**Link:** {message_link}"
                     
-                    await user.send(dm_content)
+                    # SELF-BOT FIX: Create DM channel and send
+                    dm_channel = user.dm_channel
+                    if not dm_channel:
+                        dm_channel = await user.create_dm()
+                    
+                    await dm_channel.send(dm_content)
+                    print(f"✅ Sent keyword alert to user {user_id} for keyword '{matched_keyword}'")
+                    
             except Exception as e:
-                print(f"Failed to send keyword alert DM: {e}")
+                print(f"❌ Failed to send keyword alert DM to {user_id}: {e}")
 
+
+async def setup_keyword_listener(bot, channel_id: int, config: dict):
+    """Set up keyword listener for a specific channel - SELF-BOT VERSION"""
+    try:
+        channel = bot.get_channel(channel_id)
+        if not channel:
+            # Try to fetch the channel
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except:
+                pass
+        
+        if not channel:
+            return False, "Channel not found or bot doesn't have access"
+        
+        # Store the listener config
+        listener_key = f"{bot.command_prefix}_{channel_id}"
+        listening_configs[listener_key] = config
+        await save_listening_configs()
+        
+        print(f"✅ Keyword listener set up: {listener_key} with keywords: {config['keywords']}")
+        
+        return True, f"Keyword listener set up for #{channel.name}"
+    
+    except Exception as e:
+        print(f"❌ Error setting up listener: {str(e)}")
+        return False, f"Error setting up listener: {str(e)}"
+
+
+# SELF-BOT VERSION: Updated on_message event handler
+async def on_message(message):
+    """Handle system commands, keyword monitoring, and regular commands - SELF-BOT VERSION"""
+    global emergency_stop
+
+    # Handle keyword listening for ALL messages (except our own)
+    await handle_keyword_message(message, prefix)
+
+    # Skip processing commands from other bots (but not from self)
+    if message.author.bot and message.author != bot.user:
+        return
+
+    user_id = message.author.id
+    content = message.content
+
+    # System commands (prefix: >)
+    if content.startswith(">") and user_id in ALLOWED_USERS:
+        # ... system commands remain the same ...
+        pass
+    
+    # Process normal commands
+    await bot.process_commands(message)
+
+
+# SELF-BOT VERSION: Enhanced listento command with better error handling
+@bot.command()
+async def listento(ctx, case_sensitive: str, word_match: str, keywords: str, channel_link: str):
+    """
+    Start listening for keywords in a channel - SELF-BOT VERSION
+    
+    Usage: {prefix}listento [y/n] [y/n] "keyword1,keyword2" [channel_link]
+    Example: {prefix}listento y n "hello,world" https://discord.com/channels/123/456
+    """
+    user_id = ctx.author.id
+    
+    # Parse case sensitivity
+    case_sensitive = case_sensitive.lower() == 'y'
+    word_match = word_match.lower() == 'y'
+    
+    # Parse keywords
+    keyword_list = [kw.strip() for kw in keywords.split(',')]
+    
+    # Parse channel link
+    server_id, channel_id = parse_channel_link(channel_link)
+    
+    if not channel_id:
+        await ctx.send("❌ Invalid channel link or channel ID")
+        return
+    
+    # Set up keyword listener config
+    config = {
+        'user_id': user_id,
+        'keywords': keyword_list,
+        'case_sensitive': case_sensitive,
+        'word_match': word_match,
+        'channel_id': channel_id,
+        'created_at': datetime.now().isoformat()
+    }
+    
+    success, message_result = await setup_keyword_listener(ctx.bot, channel_id, config)
+    
+    if success:
+        settings_str = f"Case-sensitive: {'Yes' if case_sensitive else 'No'}, Word match: {'Yes' if word_match else 'No'}"
+        response = f"✅ {message_result}\n**Keywords:** {', '.join(keyword_list)}\n**Settings:** {settings_str}\n**Monitoring User:** {ctx.author.name}"
+        
+        # For self-bot, send response in channel or DM
+        if ctx.guild:  # If in a server, try to DM
+            try:
+                await ctx.author.send(response)
+                await ctx.message.add_reaction("✅")  # React to original message
+            except:
+                await ctx.send(response)  # Fallback to channel
+        else:  # If in DMs, respond in DMs
+            await ctx.send(response)
+    else:
+        error_msg = f"❌ Failed to set up listener: {message_result}"
+        if ctx.guild:
+            try:
+                await ctx.author.send(error_msg)
+                await ctx.message.add_reaction("❌")
+            except:
+                await ctx.send(error_msg)
+        else:
+            await ctx.send(error_msg)
+
+
+# SELF-BOT DEBUG: Add this function to test if keyword matching works
+async def test_keyword_listener(channel_id, test_message="test"):
+    """Test function to verify keyword listener is working"""
+    for listener_key, config in listening_configs.items():
+        if listener_key.endswith(f"_{channel_id}"):
+            keywords = config['keywords']
+            case_sensitive = config['case_sensitive']
+            word_match = config['word_match']
+            
+            match_found, matched_keyword = check_keywords_match(
+                test_message, keywords, case_sensitive, word_match)
+            
+            print(f"🧪 Test for listener {listener_key}:")
+            print(f"   Message: '{test_message}'")
+            print(f"   Keywords: {keywords}")
+            print(f"   Match found: {match_found} (keyword: {matched_keyword})")
+            return match_found
+    
+    print(f"❌ No listener found for channel {channel_id}")
+    return False
 
 async def multi_bot_react(emojis: list, num_reactions: int, message_link: str, delay: float, author_id: int):
     """Add reactions using multiple bots"""
@@ -1916,4 +2071,5 @@ if __name__ == "__main__":
         print("\n🛑 Shutting down all bots...")
     except Exception as e:
         print(f"❌ Failed to start bots: {e}")
+
 
