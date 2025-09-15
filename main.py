@@ -614,8 +614,17 @@ async def handle_keyword_message(message, bot_prefix):
         word_match = config['word_match']
         user_id = config['user_id']
         
+        # For forum posts, also check the thread title
+        content_to_check = message.content
+        if (hasattr(message.channel, 'parent') and message.channel.parent and
+            hasattr(message.channel.parent, 'type') and str(message.channel.parent.type) == 'forum'):
+            # Include thread name (forum post title) in keyword matching
+            thread_title = message.channel.name
+            content_to_check = f"{thread_title} {message.content}"
+            print(f"🔍 Checking keywords in forum post title + content: '{thread_title}' + '{message.content[:50]}...'")
+        
         match_found, matched_keyword = check_keywords_match(
-            message.content, keywords, case_sensitive, word_match)
+            content_to_check, keywords, case_sensitive, word_match)
         
         if match_found:
             # Create message link
@@ -1182,6 +1191,16 @@ def create_bot(prefix: str, bot_name: str):
                     except:
                         pass
                     
+                    # Also try to send from the old bot if it's still active (before it gets closed)
+                    try:
+                        if old_prefix in bots:
+                            old_bot = bots[old_prefix]
+                            old_user = old_bot.get_user(user_id) or await old_bot.fetch_user(user_id)
+                            if old_user:
+                                await old_user.send(f"🔄 My prefix has been changed from '{old_prefix}' to '{new_prefix}'. I'm restarting with the new prefix!")
+                    except:
+                        pass
+                    
                 except Exception as e:
                     try:
                         await message.author.send(f"❌ Failed to change prefix: {str(e)}")
@@ -1306,18 +1325,38 @@ def create_bot(prefix: str, bot_name: str):
         return is_authorized
 
     @bot.command()
-    async def send(ctx, message: str, delay: float, amount: int):
+    async def send(ctx, message: str, delay: float, amount: int, channel_link: str = None):
         """
         Send a message multiple times with a specified delay between each message.
 
-        Usage: {prefix}send [message] [delay] [amount]
-        Example: {prefix}send "Hello World" 1.0 5
+        Usage: {prefix}send [message] [delay] [amount] [channel_link]
+        Example: {prefix}send "Hello World" 1.0 5 https://discord.com/channels/123/456
 
         Parameters:
         - message: The message to send (use quotes for multi-word messages)
         - delay: Delay in seconds between messages (minimum 0.5 seconds)
         - amount: Number of times to send the message (1-20)
+        - channel_link: Optional channel link to send to (for DM usage)
         """
+        # Parse target channel if link provided
+        target_channel = ctx.channel
+        if channel_link:
+            server_id, channel_id, message_id = parse_message_link(channel_link)
+            if not channel_id:
+                # Try parsing as just channel link
+                server_id, channel_id = parse_channel_link(channel_link)
+            
+            if channel_id:
+                try:
+                    target_channel = ctx.bot.get_channel(channel_id)
+                    if not target_channel:
+                        target_channel = await ctx.bot.fetch_channel(channel_id)
+                except:
+                    await ctx.author.send("❌ Could not access the specified channel")
+                    return
+            else:
+                await ctx.author.send("❌ Invalid channel link provided")
+                return
         try:
             # Validate delay parameter
             if delay < MIN_DELAY:
@@ -1357,7 +1396,31 @@ def create_bot(prefix: str, bot_name: str):
             except Exception:
                 pass
 
-            await execute_send_command(ctx, message, delay, amount)
+            # Create modified context for target channel
+            if channel_link and target_channel != ctx.channel:
+                # Create a mock context with the target channel
+                class MockContext:
+                    def __init__(self, original_ctx, target_channel):
+                        self.bot = original_ctx.bot
+                        self.author = original_ctx.author
+                        self.channel = target_channel
+                        self.guild = target_channel.guild if hasattr(target_channel, 'guild') else None
+                        self.message = original_ctx.message
+                        
+                    async def send(self, content):
+                        return await self.channel.send(content)
+                
+                mock_ctx = MockContext(ctx, target_channel)
+                await execute_send_command(mock_ctx, message, delay, amount)
+                
+                # Notify user about target channel
+                try:
+                    channel_name = f"#{target_channel.name}" if hasattr(target_channel, 'name') else str(target_channel)
+                    await ctx.author.send(f"✅ Sending {amount} messages to {channel_name}")
+                except:
+                    pass
+            else:
+                await execute_send_command(ctx, message, delay, amount)
 
         except ValueError:
             try:
@@ -1422,17 +1485,36 @@ def create_bot(prefix: str, bot_name: str):
                 pass
 
     @bot.command()
-    async def spm(ctx, action: str, message: str = None, delay: float = 1.0):
+    async def spm(ctx, action: str, message: str = None, delay: float = 1.0, channel_link: str = None):
         """
         Continuous spam command with start/stop functionality.
 
-        Usage: {prefix}spm start [message] [delay]
+        Usage: {prefix}spm start [message] [delay] [channel_link]
                {prefix}spm stop
 
         Examples:
-        {prefix}spm start "Hello" 1.0
+        {prefix}spm start "Hello" 1.0 https://discord.com/channels/123/456
         {prefix}spm stop
         """
+        # Parse target channel if link provided for start action
+        target_channel = ctx.channel
+        if action.lower() == "start" and channel_link:
+            server_id, channel_id, message_id = parse_message_link(channel_link)
+            if not channel_id:
+                # Try parsing as just channel link
+                server_id, channel_id = parse_channel_link(channel_link)
+            
+            if channel_id:
+                try:
+                    target_channel = ctx.bot.get_channel(channel_id)
+                    if not target_channel:
+                        target_channel = await ctx.bot.fetch_channel(channel_id)
+                except:
+                    await ctx.author.send("❌ Could not access the specified channel")
+                    return
+            else:
+                await ctx.author.send("❌ Invalid channel link provided")
+                return
         user_id = ctx.author.id
 
         if action.lower() == "start":
@@ -1459,7 +1541,31 @@ def create_bot(prefix: str, bot_name: str):
             except Exception:
                 pass
 
-            await execute_spm_command(ctx, prefix, message, delay)
+            # Create modified context for target channel if needed
+            if channel_link and target_channel != ctx.channel:
+                # Create a mock context with the target channel
+                class MockContext:
+                    def __init__(self, original_ctx, target_channel):
+                        self.bot = original_ctx.bot
+                        self.author = original_ctx.author
+                        self.channel = target_channel
+                        self.guild = target_channel.guild if hasattr(target_channel, 'guild') else None
+                        self.message = original_ctx.message
+                        
+                    async def send(self, content):
+                        return await self.channel.send(content)
+                
+                mock_ctx = MockContext(ctx, target_channel)
+                await execute_spm_command(mock_ctx, prefix, message, delay)
+                
+                # Notify user about target channel
+                try:
+                    channel_name = f"#{target_channel.name}" if hasattr(target_channel, 'name') else str(target_channel)
+                    await ctx.author.send(f"✅ Starting spam in {channel_name}")
+                except:
+                    pass
+            else:
+                await execute_spm_command(ctx, prefix, message, delay)
 
         elif action.lower() == "stop":
             spam_key = f"{prefix}_{user_id}"
@@ -2035,7 +2141,7 @@ Use `{prefix}bothelp [category]` for detailed help."""
             if check_user_authorization(ctx.author.id, prefix):
                 try:
                     await ctx.author.send(
-                        f"⚠️ Unknown command. Use `{prefix}help_bot` for available commands."
+                        f"⚠️ Unknown command. Use `{prefix}bothelp` for available commands."
                     )
                 except:
                     pass
@@ -2044,7 +2150,7 @@ Use `{prefix}bothelp [category]` for detailed help."""
             if check_user_authorization(ctx.author.id, prefix):
                 try:
                     await ctx.author.send(
-                        f"⚠️ Missing required arguments. Use `{prefix}help_bot` for command usage."
+                        f"⚠️ Missing required arguments. Use `{prefix}bothelp` for command usage."
                     )
                 except:
                     pass
@@ -2053,7 +2159,7 @@ Use `{prefix}bothelp [category]` for detailed help."""
             if check_user_authorization(ctx.author.id, prefix):
                 try:
                     await ctx.author.send(
-                        f"⚠️ Invalid argument type. Use `{prefix}help_bot` for command usage."
+                        f"⚠️ Invalid argument type. Use `{prefix}bothelp` for command usage."
                     )
                 except:
                     pass
