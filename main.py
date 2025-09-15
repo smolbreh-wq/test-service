@@ -1838,19 +1838,19 @@ def create_bot(prefix: str, bot_name: str):
                 pass
 
     @bot.command()
-    async def help(ctx, category: str = None):
+    async def bothelp(ctx, category: str = None):
         """Display categorized help information"""
         if category is None:
             # Show main help with categories
             help_message = f"""🤖 **Discord Multi-Bot Help** (Prefix: {prefix})
 
 **📋 Available Categories:**
-• `{prefix}help basic` - Message sending & control
-• `{prefix}help editing` - Live spam editing
-• `{prefix}help reactions` - Multi-bot reactions
-• `{prefix}help keywords` - Keyword monitoring
-• `{prefix}help system` - Emergency & info commands
-• `{prefix}help management` - Bot management
+• `{prefix}bothelp basic` - Message sending & control
+• `{prefix}bothelp editing` - Live spam editing
+• `{prefix}bothelp reactions` - Multi-bot reactions
+• `{prefix}bothelp keywords` - Keyword monitoring
+• `{prefix}bothelp system` - Emergency & info commands
+• `{prefix}bothelp management` - Bot management
 
 **🔥 Quick Commands:**
 • `{prefix}send "message" 1.0 5` - Send message 5 times
@@ -1860,7 +1860,7 @@ def create_bot(prefix: str, bot_name: str):
 
 **⚡ Emergency:** `>stopall` stops everything instantly
 
-Type `{prefix}help [category]` for detailed commands."""
+Type `{prefix}bothelp [category]` for detailed commands."""
             
             await ctx.author.send(help_message)
             return
@@ -2012,7 +2012,7 @@ Manage bot-specific authorized users
 • `system` - Emergency & info commands
 • `management` - Bot management
 
-Use `{prefix}help [category]` for detailed help."""
+Use `{prefix}bothelp [category]` for detailed help."""
         
         # Check message length
         if len(help_message) > 1800:
