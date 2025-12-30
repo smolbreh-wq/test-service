@@ -2769,7 +2769,7 @@ async def run_multiple_bots():
 
 if __name__ == "__main__":
     # Start the Flask keep-alive server
-    # keep_alive()
+    keep_alive()
 
     print("🤖 Discord Multi-Bot System with Enhanced Features Starting...")
     print("=" * 70)
@@ -2828,4 +2828,5 @@ if __name__ == "__main__":
         print("\n🛑 Shutting down all bots...")
     except Exception as e:
         print(f"❌ Failed to start bots: {e}")
+
 
